@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Virtual environments
+.venv/
+.venv-android/
+venv/
+
+# Buildozer / android / ios output
+bin/
+build/
+.buildozer/
+.android/
+.kivy/
+__pycache__/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Build logs
+build_apk.log
