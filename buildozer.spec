@@ -26,7 +26,7 @@ version = 0.1.0
 # Android gagal (ImportError: missing configuration file ['config.py']) dan app
 # langsung crash. Recipe native `opencv` memakai OPENCV_SKIP_PYTHON_LOADER=ON
 # sehingga cv2.so dimuat langsung tanpa `config.py` -> Layer 1 optik bekerja.
-requirements = python3,kivy,kivymd==1.2.0,pillow,opencv,numpy,camera4kivy,gestures4kivy,plyer,pyzbar
+requirements = python3,kivy,kivymd==1.2.0,pillow,opencv,numpy,camera4kivy,gestures4kivy,plyer,pyzbar,certifi,urllib3
 
 # Entry point script. Catatan: Kivy di Android SELALU mengeksekusi `main.py`
 # (bukan file ini). Karena itu `app/main.py` kini adalah dispatcher yang
@@ -70,7 +70,7 @@ android.build_tools_version = 35.0.0
 
 # (bool) Added to package to allow access to the camera hardware
 # READ_MEDIA_IMAGES dibutuhkan untuk membaca gambar galeri di Android 13+.
-android.permissions = CAMERA, READ_EXTERNAL_STORAGE, WRITE_EXTERNAL_STORAGE, READ_MEDIA_IMAGES
+android.permissions = CAMERA, READ_EXTERNAL_STORAGE, WRITE_EXTERNAL_STORAGE, READ_MEDIA_IMAGES, ACCESS_FINE_LOCATION, ACCESS_COARSE_LOCATION, INTERNET
 
 # (str) Icon for the application
 icon.filename = %(source.dir)s/icons/icon.png

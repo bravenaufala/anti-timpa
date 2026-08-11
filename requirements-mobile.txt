@@ -1,0 +1,12 @@
+# Mobile (Android via python-for-android / iOS via Kivy-iOS) dependencies
+# These versions are buildozer-compatible recipes. Tune as needed.
+kivy
+kivymd
+opencv-python
+numpy
+pillow
+plyer
+camera4kivy
+gestures4kivy
+urllib3
+certifi
