@@ -135,9 +135,15 @@ from kivy.lang import Builder
 from kivy.graphics import Color, Rectangle
 from kivy.graphics.texture import Texture
 from kivy.metrics import dp
+from kivy.network.urlrequest import UrlRequest
 from kivy.uix.image import Image as KivyImage
 from kivymd.app import MDApp
 from kivymd.uix.label import MDLabel
+
+try:
+    from plyer import gps
+except Exception:
+    gps = None
 
 # Layer 2 is always pure-Python (stdlib only).
 from layer2_emvco import process_layer2_tlv
@@ -329,6 +335,7 @@ if CAMERA4KIVY:
                         bgr,
                         optical_type="physical_camera_scan",
                         force_raw=force_raw,
+                        client_city=app.client_city,
                     )
                     hud = app._draw_hud(bgr, snap)
                     # Buat texture RGBA (thread-safe utk ditampilkan di UI).
@@ -422,6 +429,10 @@ class AntiTimpaMobileApp(MDApp):
         self._snapshot = None                # snapshot terakhir (thread-safe)
         self._snap_scheduled = False         # flag 'latest-only' update hasil
 
+        self.client_city = None
+        self.last_gps_coords = None
+        self.is_fetching_city = False
+
         if self.dual:
             self.core = QrisScannerCore(blur_threshold=100.0, fifo_size=5)
 
@@ -488,7 +499,7 @@ class AntiTimpaMobileApp(MDApp):
                     request_permissions, Permission, check_permission)
                 if not check_permission(Permission.CAMERA):
                     request_permissions(
-                        [Permission.CAMERA],
+                        [Permission.CAMERA, Permission.ACCESS_FINE_LOCATION, Permission.ACCESS_COARSE_LOCATION],
                         self._granted)
                 else:
                     self._granted([])
@@ -503,7 +514,58 @@ class AntiTimpaMobileApp(MDApp):
     def _granted(self, permissions):
         # Apapun hasil izin, coba tautkan kamera; Camera4Kivy menangani
         # penolakan dengan pesan sendiri.
+        self._start_gps()
         Clock.schedule_once(lambda dt: self._start_camera(), 0.0)
+
+    def _start_gps(self):
+        # Layer 3 GPS: ambil koordinat lalu reverse-geocode ke nama kota.
+        if gps:
+            try:
+                gps.configure(on_location=self._on_location)
+                gps.start(minTime=10000, minDistance=50) # every 10s or 50m
+            except Exception as e:
+                log_crash("GPS START ERROR", "Gagal start GPS.", e=e)
+
+    @mainthread
+    def _on_location(self, **kwargs):
+        lat = kwargs.get('lat')
+        lon = kwargs.get('lon')
+        if lat and lon:
+            self.last_gps_coords = (lat, lon)
+            self._fetch_city_from_coords(lat, lon)
+
+    def _fetch_city_from_coords(self, lat, lon):
+        if self.is_fetching_city:
+            return
+        self.is_fetching_city = True
+        if self.client_city is None:
+            self.client_city = "LOADING"
+
+        url = f"https://nominatim.openstreetmap.org/reverse?lat={lat}&lon={lon}&format=json&zoom=10"
+        try:
+            UrlRequest(
+                url,
+                on_success=self._on_city_success,
+                on_failure=self._on_city_fail,
+                on_error=self._on_city_fail,
+                req_headers={'User-Agent': 'AntiTimpaApp/0.1.0'}
+            )
+        except Exception as _e:
+            log_crash("GEOCODE ERROR", "Gagal reverse geocoding.", e=_e)
+            self.is_fetching_city = False
+
+    def _on_city_success(self, req, result):
+        self.is_fetching_city = False
+        try:
+            address = result.get("address", {})
+            city = address.get("city") or address.get("town") or address.get("county")
+            if city:
+                self.client_city = city.upper()
+        except Exception:
+            pass
+
+    def _on_city_fail(self, req, error):
+        self.is_fetching_city = False
 
     def _set_status(self, msg):
         mode = self.root.ids.mode_label if self.root else None
@@ -679,6 +741,7 @@ class AntiTimpaMobileApp(MDApp):
         snap = self.core.process_frame(
             frame, optical_type="physical_camera_scan",
             force_bbox=force_bbox, force_raw=force_raw,
+            client_city=self.client_city,
         )
         hud = self._draw_hud(frame, snap)
         self._show_preview(hud)
@@ -757,6 +820,7 @@ class AntiTimpaMobileApp(MDApp):
         title = self.root.ids.result_title
         l1 = snap['l1']
         l2 = snap['l2']
+        l3 = snap.get('l3', {})
         self._apply_risk_style(title, snap['combined_score'], l2.get('crc_valid', True))
         self._clear_box()
 
@@ -771,7 +835,14 @@ class AntiTimpaMobileApp(MDApp):
         self._add_row("Layer 2 - Kota", l2.get('merchant_city') or 'N/A')
         self._add_row("Layer 2 - MCC", l2.get('mcc') or 'N/A')
         self._add_row("Layer 2 - Mode Inisiasi", l2.get('initiation_mode') or 'N/A')
-        self._add_warnings(l2.get('warnings', []))
+
+        c_city = l3.get('client_city', 'N/A')
+        self._add_row("Layer 3 - Lokasi Klien", c_city)
+        self._add_row("Layer 3 - Geofence Status", l3.get('risk_level', 'N/A'))
+        self._add_row("Layer 3 - Skor", f"{l3.get('l3_score', 0.0):.3f}")
+
+        all_warnings = l2.get('warnings', []) + l3.get('warnings', [])
+        self._add_warnings(all_warnings)
 
     def _render_text_only(self, result):
         title = self.root.ids.result_title

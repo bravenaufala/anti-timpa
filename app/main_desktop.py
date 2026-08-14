@@ -148,24 +148,65 @@ MDScreen:
                             text_color: 0.75, 0.78, 0.82, 1
                             font_style: "Caption"
 
-                ResultCard:
-                    MDBoxLayout:
-                        orientation: "vertical"
-                        adaptive_height: True
-                        md_bg_color: 0.0, 0.0, 0.0, 0.0
-                        MDLabel:
-                            text: "Status Feed"
-                            bold: True
-                            theme_text_color: "Custom"
-                            text_color: 0.75, 0.85, 0.75, 1
-                        MDLabel:
-                            id: status_text
-                            text: "Kamera: menunggu..."
-                            theme_text_color: "Custom"
-                            text_color: 0.85, 0.88, 0.92, 1
-                            font_style: "Caption"
+                    ResultCard:
+                        MDBoxLayout:
+                            orientation: "vertical"
+                            adaptive_height: True
+                            md_bg_color: 0.0, 0.0, 0.0, 0.0
+                            MDLabel:
+                                text: "Layer 3 - Kota Geofence"
+                                bold: True
+                                theme_text_color: "Custom"
+                                text_color: 0.8, 0.85, 0.55, 1
+                            MDLabel:
+                                id: l3_text
+                                text: "Kota Klien: —  |  Kota Merchant: —  |  Skor: —"
+                                theme_text_color: "Custom"
+                                text_color: 0.85, 0.88, 0.92, 1
+                                font_style: "Caption"
+                            MDLabel:
+                                id: l3_status_text
+                                text: "Status: —"
+                                theme_text_color: "Custom"
+                                text_color: 1.0, 0.65, 0.55, 1
+                                font_style: "Caption"
 
-                # ---------- Actions ----------
+                    ResultCard:
+                        MDBoxLayout:
+                            orientation: "vertical"
+                            adaptive_height: True
+                            md_bg_color: 0.0, 0.0, 0.0, 0.0
+                            MDLabel:
+                                text: "Status Feed"
+                                bold: True
+                                theme_text_color: "Custom"
+                                text_color: 0.75, 0.85, 0.75, 1
+                            MDLabel:
+                                id: status_text
+                                text: "Kamera: menunggu..."
+                                theme_text_color: "Custom"
+                                text_color: 0.85, 0.88, 0.92, 1
+                                font_style: "Caption"
+
+                    # ---------- Layer 3 (desktop) client city input ----------
+                    MDBoxLayout:
+                        size_hint_y: None
+                        height: "48dp"
+                        spacing: "8dp"
+                        adaptive_width: True
+                        pos_hint: {"center_x": 0.5}
+                        MDTextField:
+                            id: client_city_input
+                            hint_text: "Kota Klien (opsional, utk geofence layer 3)"
+                            multiline: False
+                            size_hint_x: 0.55
+                        MDRaisedButton:
+                            text: "Gunakan Kota"
+                            theme_text_color: "Custom"
+                            text_color: 0.9, 0.9, 1, 1
+                            on_release: app.use_client_city()
+
+                    # ---------- Actions ----------
                 MDBoxLayout:
                     size_hint_y: None
                     height: "52dp"
@@ -220,6 +261,20 @@ class AntiTimpaApp(MDApp):
         self.is_running = False
         self.sim_count = 0
         self.notify_ev = None
+        self.client_city = None
+
+    def use_client_city(self):
+        """Set kota klien dari input (desktop tak punya GPS)."""
+        try:
+            val = self.root.ids.get("client_city_input").text.strip()
+        except Exception:
+            val = ""
+        if val:
+            self.client_city = val.upper()
+            self._set_status(f"Kota klien di-set: {self.client_city} (Layer 3 aktif).")
+        else:
+            self.client_city = None
+            self._set_status("Kota klien dikosongkan — Layer 3 dilewati.")
 
     def build(self):
         self.theme_cls.primary_palette = "Blue"
@@ -335,6 +390,7 @@ class AntiTimpaApp(MDApp):
             optical_type="physical_camera_scan",
             force_bbox=force_bbox,
             force_raw=force_raw,
+            client_city=self.client_city,
         )
 
         # Render preview + HUD
@@ -378,6 +434,7 @@ class AntiTimpaApp(MDApp):
         ids = self.root.ids
         l1 = snap['l1']
         l2 = snap['l2']
+        l3 = snap.get('l3', {})
 
         # Risk card
         risk_lbl = ids.get("risk_level_label")
@@ -387,7 +444,7 @@ class AntiTimpaApp(MDApp):
         if sc is not None:
             sc.text = f"Score Gabungan: {snap['combined_score']:.3f}"
 
-        warnings = l2.get('warnings', [])
+        warnings = l2.get('warnings', []) + l3.get('warnings', [])
         warns = ids.get("risk_warnings_label")
         if warns is not None:
             warns.text = "Warnings: " + ("; ".join(warnings) if warnings else "Tidak ada")
@@ -408,6 +465,16 @@ class AntiTimpaApp(MDApp):
         mode_t = ids.get("l2_mode_text")
         if mode_t is not None:
             mode_t.text = f"Mode: {l2.get('initiation_mode') or 'N/A'}  |  Payload: {l2.get('parsed_tlv', {}).get('00', 'N/A')}"
+
+        l3_t = ids.get("l3_text")
+        if l3_t is not None:
+            l3_t.text = (f"Kota Klien: {l3.get('client_city') or 'N/A'}  |  "
+                         f"Kota Merchant: {l3.get('merchant_city') or 'N/A'}  |  "
+                         f"Skor: {l3.get('l3_score', 0):.2f}")
+
+        l3_status = ids.get("l3_status_text")
+        if l3_status is not None:
+            l3_status.text = f"Status: {l3.get('risk_level', 'N/A')}"
 
         status = ids.get("status_text")
         if status is not None:

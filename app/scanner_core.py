@@ -29,6 +29,7 @@ import numpy as np
 
 from layer1_optical import process_layer1_edge
 from layer2_emvco import process_layer2_tlv
+from layer3_geofence import process_layer3_geofence
 
 
 class QrisScannerCore:
@@ -73,6 +74,13 @@ class QrisScannerCore:
             'merchant_city': '',
             'parsed_tlv': {},
             'warnings': [],
+        }
+        self.l3_metrics: Dict[str, Any] = {
+            'l3_score': 0.0,
+            'risk_level': 'NO QR',
+            'warnings': [],
+            'client_city': None,
+            'merchant_city': None
         }
         self.combined_score: float = 0.0
         self.combined_risk_level: str = 'NO QR'
@@ -250,6 +258,7 @@ class QrisScannerCore:
         optical_type: str = "physical_camera_scan",
         force_bbox: Optional[Tuple[int, int, int, int]] = None,
         force_raw: Optional[str] = None,
+        client_city: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Process a single BGR frame through the full dual-layer pipeline.
@@ -291,15 +300,22 @@ class QrisScannerCore:
                 scan_context={"optical_type": optical_type},
             )
 
+            # Layer 3: Geofence (City match)
+            self.l3_metrics = process_layer3_geofence(
+                client_city,
+                self.l2_metrics.get('merchant_city')
+            )
+
             l1_score = self.l1_metrics.get('l1_score', 0.0)
             l2_score = self.l2_metrics.get('l2_score', 0.0)
+            l3_score = self.l3_metrics.get('l3_score', 0.0)
             crc_valid = self.l2_metrics.get('crc_valid', True)
 
             # Hard-veto when CRC invalid
             if not crc_valid:
                 self.combined_score = 1.0
             else:
-                self.combined_score = max(l1_score, l2_score)
+                self.combined_score = max(l1_score, l2_score, l3_score)
 
             if self.combined_score < 0.35 and crc_valid:
                 self.combined_risk_level = 'LOW RISK'
@@ -335,6 +351,7 @@ class QrisScannerCore:
         return {
             'l1': dict(self.l1_metrics),
             'l2': dict(self.l2_metrics),
+            'l3': dict(self.l3_metrics),
             'combined_score': float(self.combined_score),
             'combined_risk_level': self.combined_risk_level,
             'is_blurry': bool(self.is_blurry),

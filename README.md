@@ -1,9 +1,9 @@
 # Anti Timpa QRIS Scanner
 
-Scanner keamanan QRIS dua-lapis (Layer 1 optik + Layer 2 EMVCo) yang dibungkus
-menjadi aplikasi **lintas-platform** (desktop / Android / iOS) dengan
-**KivyMD**. Seluruh analisis berjalan **lokal di perangkat** — tanpa server,
-tanpa cloud, tanpa akses jaringan.
+Scanner keamanan QRIS tiga-lapis (Layer 1 optik + Layer 2 EMVCo + Layer 3
+Kota geofence) yang dibungkus menjadi aplikasi **lintas-platform** (desktop /
+Android / iOS) dengan **KivyMD**. Seluruh analisis berjalan **lokal di
+perangkat** — tanpa server, tanpa cloud.
 
 ## Struktur
 
@@ -11,16 +11,19 @@ tanpa cloud, tanpa akses jaringan.
 anti-timpa/
 ├── layer1_optical.py        # Analisis tamper fisik (edge density + glare) [tidak diubah]
 ├── layer2_emvco.py          # Validasi payload EMVCo + CRC-16 [tidak diubah]
+├── layer3_geofence.py       # Geofence kota (GPS klien vs kota merchant Tag 60)
 ├── test_layer1.py           # Test Layer 1 (dipertahankan)
 ├── test_layer2.py           # Test Layer 2 (dipertahankan)
 ├── live_scanner.py          # Skrip desktop konsol asli (dipertahankan)
 ├── camerax_provider/        # Provider kamera CameraX utk Camera4Kivy (hook p4a)
 ├── app/
 │   ├── main.py              # Aplikasi KivyMD (entry point desktop)
-│   ├── main_mobile.py       # Aplikasi KivyMD mobile: Layer 1 + 2 + kamera nyata
-│   ├── scanner_core.py      # Mesin analisis lintas-platform (lokal)
+│   ├── main_mobile.py       # Aplikasi KivyMD mobile: Layer 1 + 2 + 3 + kamera nyata
+│   ├── main_desktop.py      # Aplikasi KivyMD desktop: Layer 1 + 2 + 3
+│   ├── scanner_core.py      # Mesin analisis lintas-platform (L1 + L2 + L3)
 │   ├── layer1_optical.py    # Salinan layer1 (waib agar ter-paket ke APK)
 │   ├── layer2_emvco.py      # Salinan layer2 (waib agar ter-paket ke APK)
+│   ├── layer3_geofence.py   # Salinan layer3 (waib agar ter-paket ke APK)
 │   ├── requirements-desktop.txt
 │   └── requirements-mobile.txt
 ├── buildozer.spec           # Konfigurasi build Android (APK)
@@ -67,6 +70,19 @@ Jika kamera tidak tersedia, aplikasi otomatis beralih ke **mode simulasi**
 - **CAUTION** (0.35–0.70)
 - **HIGH RISK** (> 0.70 atau CRC gagal — veto keras)
 
+## Layer 3 — Geofence Kota
+
+Kota klien (dari GPS, di-reverse-geocode ke nama kota) dibandingkan dengan kota
+merchant dari QR (Tag 60). Cocok → `LOW RISK`; tidak cocok → `HIGH RISK`
+(anomali geofence). Jika lokasi klien atau kota merchant tidak tersedia, cek
+dilewati (`LOW RISK`). Skor `l3_score` ikut dalam skor gabungan
+(`max(l1, l2, l3)`), dengan veto keras CRC bila gagal.
+
+- **Mobile**: GPS (`plyer.gps`) + reverse geocoding (Nominatim). Izin lokasi
+  diminta bersama izin kamera.
+- **Desktop**: tidak ada GPS — set kota klien manual lewat kotak input
+  "Kota Klien" lalu tekan "Gunakan Kota".
+
 ## Mobile: dual-layer (Layer 1 + Layer 2) + kamera nyata
 
 `app/main_mobile.py` menjalankan **Layer 1 optik DAN Layer 2 EMVCo** langsung di
@@ -89,6 +105,8 @@ mode **Layer-2-only** (tempel payload + Analisis).
 
 - ~~Bridge kamera nyata Android (`camera4kivy`)~~ — selesai (APK debug sudah
   memakai CameraX).
+- ~~Layer 3 — Geofence kota (GPS mobile / kota manual desktop)~~ — selesai
+  (terhubung ke versi mobile & desktop).
 - Kamera iOS ke OpenCV via bridge native (Camera4Kivy AVFoundation).
 - Rilis `release` APK (bukan `debug`) + keystore untuk Play Store.
 - Pilih file QRIS dari galeri pada Android/iOS (plyer `filechooser`) sudah
