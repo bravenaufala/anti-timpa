@@ -78,10 +78,23 @@ merchant dari QR (Tag 60). Cocok → `LOW RISK`; tidak cocok → `HIGH RISK`
 dilewati (`LOW RISK`). Skor `l3_score` ikut dalam skor gabungan
 (`max(l1, l2, l3)`), dengan veto keras CRC bila gagal.
 
-- **Mobile**: GPS (`plyer.gps`) + reverse geocoding (Nominatim). Izin lokasi
+- Mobile: GPS (`plyer.gps`) + reverse geocoding (Nominatim). Izin lokasi
   diminta bersama izin kamera.
-- **Desktop**: tidak ada GPS — set kota klien manual lewat kotak input
+- Desktop: tidak ada GPS — set kota klien manual lewat kotak input
   "Kota Klien" lalu tekan "Gunakan Kota".
+
+## Log detail scan (UI + adb logcat)
+
+Setiap kali hasil scan diperbarui, app menulis **log detail** ke tiga tempat:
+
+1. **Layar** — panel `[Log Detail]` tepat di bawah judul hasil, berisi payload
+   QR, nilai blur, skor L1/L2/L3, CRC (encoded), dan warning.
+2. **File** `antitimpa.log` di app private storage.
+3. **Logcat Android** dengan tag `ANTITIMPA` — dibaca dari komputer via
+   ```bash
+   adb logcat -s ANTITIMPA
+   ```
+   (pakai `adb shell logcat -s ANTITIMPA` kalau ingin langsung di device.)
 
 ## Mobile: dual-layer (Layer 1 + Layer 2) + kamera nyata
 
@@ -100,6 +113,15 @@ Bila kamera tidak tersedia, aplikasi otomatis beralih ke **generator sintetik**
 (yang menyuntikkan anomali stiker + glare) sehingga pipeline Layer 1 tetap jalan
 di perangkat untuk demo. Bila OpenCV tidak ter-paket (APK ringan), turun ke
 mode **Layer-2-only** (tempel payload + Analisis).
+
+### Kamera = one-shot (macam Import Gambar)
+
+Di kamera nyata, thread kamera **hanya preview** (sangat ringan, tanpa decode
+per frame). Saat pengguna menekan tombol **"Ambil Foto QR (One-Shot)"**, app
+mengambil **SATU frame** terakhir lalu menganalisisnya memakai decoder mendalam
+yang sama dengan mode **Import Gambar** (`pyzbar` + multi-skala/CLAHE) di
+thread terpisah — lebih andal dan tidak bikin hang. Hasil + log rincian
+(`adb logcat -s ANTITIMPA`) langsung ditampilkan.
 
 ## Roadmap
 

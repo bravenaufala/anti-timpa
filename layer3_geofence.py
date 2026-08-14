@@ -19,21 +19,27 @@ def process_layer3_geofence(
         return {
             "l3_score": 0.0,
             "risk_level": "LOW RISK",
-            "warnings": ["Merchant City missing from QR code - skipped geofence check"]
+            "warnings": ["Merchant City missing from QR code - skipped geofence check"],
+            "client_city": client_city,
+            "merchant_city": None,
         }
         
     if not client_city:
         return {
             "l3_score": 0.0,
             "risk_level": "LOW RISK",
-            "warnings": ["Client Location unavailable - skipped geofence check"]
+            "warnings": ["Client Location unavailable - skipped geofence check"],
+            "client_city": None,
+            "merchant_city": merchant_city,
         }
 
     if client_city == "LOADING":
         return {
             "l3_score": 0.5,
             "risk_level": "CAUTION",
-            "warnings": ["Client Location is loading (API call in progress)..."]
+            "warnings": ["Client Location is loading (API call in progress)..."],
+            "client_city": client_city,
+            "merchant_city": merchant_city,
         }
 
     c_city = client_city.upper().strip()

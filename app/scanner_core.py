@@ -291,38 +291,66 @@ class QrisScannerCore:
         if self.qr_bbox is not None and not self.is_blurry:
             self.fifo_queue.append(frame.copy())
 
-            # Layer 1: optical tampering
+            # Layer 1: optical tampering (selalu diukur saat ada bbox QR)
             self.l1_metrics = process_layer1_edge(list(self.fifo_queue), self.qr_bbox)
 
-            # Layer 2: EMVCo payload rules
-            self.l2_metrics = process_layer2_tlv(
-                self.last_raw_qris_str,
-                scan_context={"optical_type": optical_type},
-            )
+            have_payload = bool(self.last_raw_qris_str)
+            if have_payload:
+                # Layer 2 hanya dijalankan saat payload benar-benar ter-decode.
+                # Kalau QR terdeteksi tapi belum terbaca (raw kosong), JANGAN
+                # menghakimi CRC (veto HIGH RISK) — itu membuat QR yang benar
+                # terlihat rusak hanya karena decode belum selesai.
+                self.l2_metrics = process_layer2_tlv(
+                    self.last_raw_qris_str,
+                    scan_context={"optical_type": optical_type},
+                )
 
-            # Layer 3: Geofence (City match)
-            self.l3_metrics = process_layer3_geofence(
-                client_city,
-                self.l2_metrics.get('merchant_city')
-            )
+                # Layer 3: Geofence (City match)
+                self.l3_metrics = process_layer3_geofence(
+                    client_city,
+                    self.l2_metrics.get('merchant_city')
+                )
 
-            l1_score = self.l1_metrics.get('l1_score', 0.0)
-            l2_score = self.l2_metrics.get('l2_score', 0.0)
-            l3_score = self.l3_metrics.get('l3_score', 0.0)
-            crc_valid = self.l2_metrics.get('crc_valid', True)
+                l1_score = self.l1_metrics.get('l1_score', 0.0)
+                l2_score = self.l2_metrics.get('l2_score', 0.0)
+                l3_score = self.l3_metrics.get('l3_score', 0.0)
+                crc_valid = self.l2_metrics.get('crc_valid', True)
 
-            # Hard-veto when CRC invalid
-            if not crc_valid:
-                self.combined_score = 1.0
+                # Hard-veto when CRC invalid (hanya valid bila payload ada)
+                if not crc_valid:
+                    self.combined_score = 1.0
+                else:
+                    self.combined_score = max(l1_score, l2_score, l3_score)
+
+                if self.combined_score < 0.35 and crc_valid:
+                    self.combined_risk_level = 'LOW RISK'
+                elif self.combined_score <= 0.70 and crc_valid:
+                    self.combined_risk_level = 'CAUTION'
+                else:
+                    self.combined_risk_level = 'HIGH RISK'
             else:
-                self.combined_score = max(l1_score, l2_score, l3_score)
-
-            if self.combined_score < 0.35 and crc_valid:
-                self.combined_risk_level = 'LOW RISK'
-            elif self.combined_score <= 0.70 and crc_valid:
-                self.combined_risk_level = 'CAUTION'
-            else:
-                self.combined_risk_level = 'HIGH RISK'
+                # Ada QR secara optik, tapi isi belum ter-decode. Jangan menvonis
+                # CRC gagal; reset metrics ke netral sampai payload terbaca supaya
+                # tidak menampilkan hasil/peringatan QR sebelumnya.
+                self.l2_metrics = {
+                    'l2_score': 0.0,
+                    'crc_valid': True,
+                    'initiation_mode': '',
+                    'mcc': '',
+                    'merchant_name': '',
+                    'merchant_city': '',
+                    'parsed_tlv': {},
+                    'warnings': ["QR terdeteksi, menunggu payload ter-decode..."],
+                }
+                self.l3_metrics = {
+                    'l3_score': 0.0,
+                    'risk_level': 'LOW RISK',
+                    'warnings': [],
+                    'client_city': client_city,
+                    'merchant_city': None,
+                }
+                self.combined_score = 0.0
+                self.combined_risk_level = 'MENUNGGU SCAN'
             # Ada QR -> reset penghitung kegagalan.
             self.no_qr_frames = 0
         elif self.is_blurry:
@@ -365,11 +393,12 @@ class QrisScannerCore:
         frame_bgr: np.ndarray,
         blur_threshold: float = 100.0,
         optical_type: str = "imported_image",
+        client_city: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         One-shot analysis of a single image (no live stream), used by the
-        import-from-gallery feature. Calculates both layers without the timestream
-        glare component (single frame), so glare variance is 0.
+        import-from-gallery feature and the camera one-shot capture. Passes
+        client_city through to Layer 3 (geofence) so user location is used.
         """
         bbox, _, raw_str = QrisScannerCore().detect_qr(frame_bgr, aggressive=True)
         if bbox is None:
@@ -377,5 +406,5 @@ class QrisScannerCore:
 
         core = QrisScannerCore(blur_threshold=blur_threshold)
         pass_bbox = (bbox[0], bbox[1], bbox[2], bbox[3])
-        snap = core.process_frame(frame_bgr, optical_type=optical_type, force_bbox=pass_bbox, force_raw=raw_str)
+        snap = core.process_frame(frame_bgr, optical_type=optical_type, force_bbox=pass_bbox, force_raw=raw_str, client_city=client_city)
         return {'ok': True, 'bbox': bbox, 'raw': raw_str, 'snapshot': snap}

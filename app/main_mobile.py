@@ -20,6 +20,7 @@ Mode analisis:
 
 import os
 import sys
+import threading
 import traceback
 from datetime import datetime
 
@@ -82,6 +83,68 @@ def log_crash(kind, text, e=None, tb=None, always_print=False):
         return text
 
 
+def _log_to_adb(tag, msg):
+    """Kirim pesan log ke logcat (sumber adb) dengan tag yang mudah difilter.
+
+    Di Android memakai `android.util.Log` (via pyjnius) supaya muncul dengan tag
+    `ANTITIMPA` dan bisa dibaca via:  adb logcat -s ANTITIMPA
+    Di luar Android (desktop/Python biasa) fallback ke print, yang tetap masuk
+    stdout (lihat README).
+    """
+    try:
+        from jnius import autoclass
+        android_log = autoclass("android.util.Log")
+        android_log.d(tag, str(msg))
+        return
+    except Exception:
+        pass
+    try:
+        print("[%s] %s" % (tag, msg), flush=True)
+    except Exception:
+        pass
+
+
+def log_scan_detail(snap):
+    """Bangun string log detail dari snapshot dan tulis ke: (1) file antitimpa.log,
+    (2) logcat adb (tag ANTITIMPA). Dipanggil tiap kali hasil scan diperbarui.
+    Mengembalikan string detail (untuk ditampilkan di UI)."""
+    l1 = snap.get('l1', {})
+    l2 = snap.get('l2', {})
+    l3 = snap.get('l3', {})
+    crc_valid = l2.get('crc_valid', False)
+    crc_txt = "VALID" if crc_valid else "GAGAL"
+
+    # Lokasi QRIS (tag 60) bisa didapat dari L2; kalau L3 tak punya, fallback.
+    qris_city = (l3.get('merchant_city') or l2.get('merchant_city') or None)
+    client_city = l3.get('client_city')
+
+    lines = [
+        "===== SCAN %s ====" % datetime.now().strftime("%H:%M:%S"),
+        "QR: %s" % (snap.get('raw_qris_str') or "(kosong)"),
+        "Blur: var=%.1f %s" % (snap.get('blur_var', 0), "BLUR" if snap.get('is_blurry') else "CLEAR"),
+        "L1 optik: edge=%.4f glare=%.5f skor=%.3f (%s)" % (
+            l1.get('spatial_edge_density', 0), l1.get('temporal_glare_var', 0),
+            l1.get('l1_score', 0), l1.get('risk_level', 'N/A')),
+        "L2 EMVCo: TLV=%s CRC=%s (encoded=%s)" % (
+            "VALID" if l2.get('parsed_tlv', {}).get('valid') else "INVALID",
+            crc_txt,
+            str(snap.get('raw_qris_str') or '')[-4:] or "?"),
+        "L2: merchant=%s kota=%s mcc=%s mode=%s" % (
+            l2.get('merchant_name') or "N/A", l2.get('merchant_city') or "N/A",
+            l2.get('mcc') or "N/A", l2.get('initiation_mode') or "N/A"),
+        "LOKASI QRIS (tag 60): %s" % (qris_city or "N/A"),
+        "LOKASI USER (GPS): %s" % (client_city or "TIDAK ADA (izin/GPS mati)"),
+        "L3 geofence: skor=%.2f status=%s" % (l3.get('l3_score', 0), l3.get('risk_level', "N/A")),
+        "GABUNGAN: skor=%.3f risk=%s" % (snap.get('combined_score', 0), snap.get('combined_risk_level', 'N/A')),
+        "Warnings: %s" % ("; ".join((l2.get('warnings') or []) + (l3.get('warnings') or [])) or "tidak ada"),
+    ]
+    detail = "\n".join(lines)
+    log_crash("SCAN", detail)
+    for line in lines:
+        _log_to_adb("ANTITIMPA", line)
+    return detail
+
+
 def _install_crash_hooks():
     """Pasang sys.excepthook + threading.excepthook supaya setiap uncaught
     exception (di thread mana pun, termasuk thread analisis Camera4Kivy)
@@ -141,9 +204,108 @@ from kivymd.app import MDApp
 from kivymd.uix.label import MDLabel
 
 try:
-    from plyer import gps
+    from plyer import gps as _plyer_gps
+    gps = _plyer_gps
+    if _plyer_gps is not None and not getattr(_plyer_gps, '_antitimpa_patched', False):
+        # plyer versi lama tidak mendeklarasikan onLocationChanged(List) yang
+        # dipanggil Android 15 (API 35) -> NotImplementedError -> lokasi tidak
+        # pernah diterima. Di-patch di bawah (module-level) agar GPS jalan.
+        pass
 except Exception:
     gps = None
+
+
+def _monkeypatch_android_gps():
+    """Perbaiki GPS Android: plyer versi lama tidak mendukung onLocationChanged
+    (List<Location>) yang dipanggil Android 15 (batch API), sehingga melempar
+    NotImplementedError dan lokasi client tidak pernah diterima. Kita ganti
+    listener + perilaku _start GPS dengan implementasi yang mendukung batch."""
+    global gps
+    if gps is None:
+        return
+    try:
+        from plyer import gps as _g
+        if getattr(_g, '_antitimpa_gps_patched', False):
+            gps = _g
+            return
+        from jnius import java_method, PythonJavaClass, autoclass
+        from plyer.platforms.android import activity, gps as _android_gps
+
+        Looper = autoclass('android.os.Looper')
+        Context = autoclass('android.content.Context')
+
+        class _FixedListener(PythonJavaClass):
+            __javainterfaces__ = ['android/location/LocationListener']
+
+            def __init__(self, root):
+                self.root = root
+                super().__init__()
+
+            def _emit(self, location):
+                self.root.on_location(
+                    lat=location.getLatitude(),
+                    lon=location.getLongitude(),
+                    speed=location.getSpeed(),
+                    bearing=location.getBearing(),
+                    altitude=location.getAltitude(),
+                    accuracy=location.getAccuracy())
+
+            @java_method('(Landroid/location/Location;)V', name='onLocationChanged')
+            def onLocationChangedSingle(self, location):
+                self._emit(location)
+
+            @java_method('(Ljava/util/List;)V', name='onLocationChanged')
+            def onLocationChangedBatch(self, location_list):
+                # Batch API (Android 15): ambil lokasi terakhir dari daftar.
+                try:
+                    location = location_list.get(location_list.size() - 1)
+                    self._emit(location)
+                except Exception:
+                    pass
+
+            @java_method('(Ljava/lang/String;)V')
+            def onProviderEnabled(self, status):
+                if self.root.on_status:
+                    self.root.on_status('provider-enabled', status)
+
+            @java_method('(Ljava/lang/String;)V')
+            def onProviderDisabled(self, status):
+                if self.root.on_status:
+                    self.root.on_status('provider-disabled', status)
+
+            @java_method('(Ljava/lang/String;ILandroid/os/Bundle;)V')
+            def onStatusChanged(self, provider, status, extras):
+                if self.root.on_status:
+                    self.root.on_status('provider-status', '{}: {}'.format(
+                        provider, status))
+
+        def _fixed_start(self, **kwargs):
+            min_time = kwargs.get('minTime')
+            min_distance = kwargs.get('minDistance')
+            if not hasattr(self, '_fixed_location_manager'):
+                self._fixed_location_manager = activity.getSystemService(
+                    Context.LOCATION_SERVICE)
+                self._fixed_listener = _FixedListener(self)
+            lm = self._fixed_location_manager
+            for provider in lm.getProviders(False).toArray():
+                try:
+                    lm.requestLocationUpdates(
+                        provider, min_time, min_distance, self._fixed_listener,
+                        Looper.getMainLooper())
+                except Exception:
+                    pass
+
+        _android_gps.AndroidGPS._start = _fixed_start
+        _g._antitimpa_gps_patched = True
+        gps = _g
+    except Exception as _e:
+        try:
+            log_crash("GPS PATCH ERROR", "Gagal patch plyer gps.", e=_e)
+        except Exception:
+            pass
+
+
+_monkeypatch_android_gps()
 
 # Layer 2 is always pure-Python (stdlib only).
 from layer2_emvco import process_layer2_tlv
@@ -246,7 +408,7 @@ _KV_REAL = '''MDScreen:
             height: "52dp"
             MDRaisedButton:
                 id: run_btn
-                text: "Mulai Kamera (L1 + L2)"
+                text: "Ambil Foto QR (One-Shot)"
                 on_release: app.start_or_analyze()
             MDRaisedButton:
                 text: "Import Gambar"
@@ -268,6 +430,18 @@ _KV_REAL = '''MDScreen:
             font_style: "H6"
             size_hint_y: None
             height: "40dp"
+
+        MDLabel:
+            id: log_detail
+            text: "Log detail scan akan tampil di sini (dan dikirim ke adb logcat)."
+            theme_text_color: "Custom"
+            text_color: 0.7, 0.95, 0.7, 1
+            font_style: "Caption"
+            size_hint_y: None
+            height: "140dp"
+            text_size: self.width - 12, None
+            halign: "left"
+            valign: "top"
 
         ScrollView:
             MDBoxLayout:
@@ -305,67 +479,53 @@ if CAMERA4KIVY:
             self._app = app_ref            # AntiTimpaMobileApp (di-set ulang di build())
             self._frame_texture = None     # Texture RGBA -> ditampilkan
             self._frame_rect = None
-            self._skip = 0                 # throttle analisis (hemet CPU)
+            self._skip = 0                 # throttle preview (hemet CPU)
+            self._last_pixels = None       # buffer RGBA frame terakhir (utk tombol)
+            self._last_size = None         # (w, h) frame terakhir
 
-        # -- Per-frame camera analysis (thread analisis Camera4Kivy) ----------
-        # Throttling: hanya sebagian frame yang dianalisis penuh (Layer1+Layer2).
-        # Sisanya hanya dirender ke preview (ringan). Ini memangkas CPU besar.
+        # -- Kamera: preview-only (SANGAT ringan) -------------------------------
+        # Thread kamera HANYA menampilkan preview. TIDAK ada cvtColor/detect_qr
+        # per frame di sini — itu yang bikin berat sampai hang di device rendah.
+        # Capture + analisis dilakukan EKSPLISIT saat pengguna menekan tombol
+        # "Ambil Foto QR" (lihat app.take_photo()), lalu decode di thread yang
+        # sama dengan preview di-render tanpa konversi ekstra.
         def analyze_pixels_callback(self, pixels, image_size, image_pos,
                                     image_scale, mirror):
             app = self._app
             if app is None or not app.dual:
                 return
-            w, h = image_size
-            try:
-                # pixels: RGBA byte buffer (w*h*4). Konversi ke BGR numpy.
-                rgba = np.frombuffer(pixels, dtype=np.uint8).reshape((h, w, 4))
-                bgr = cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGR)
-
-                # throttle: analisis penuh tiap 4 frame (hemet CPU, tetap responsif)
-                do_analyze = (self._skip >= 3)
-                if do_analyze:
-                    self._skip = 0
-                else:
-                    self._skip += 1
-
-                if do_analyze:
-                    # Layani payload tepel dari kotak input, kalau ada.
-                    force_raw = app.pasted_raw()
-                    snap = app.core.process_frame(
-                        bgr,
-                        optical_type="physical_camera_scan",
-                        force_raw=force_raw,
-                        client_city=app.client_city,
-                    )
-                    hud = app._draw_hud(bgr, snap)
-                    # Buat texture RGBA (thread-safe utk ditampilkan di UI).
-                    out = cv2.cvtColor(hud, cv2.COLOR_BGR2RGBA)
-                    self._set_texture(out.tobytes(), w, h)
-                    # Perbarui kartu hasil (lewat main thread).
-                    app.post_snapshot(snap)
-                else:
-                    # frame antara: tampilkan apa adanya (tanpa HUD) - lebih ringan
-                    self._set_texture(rgba.tobytes(), w, h)
-
-            except Exception as _e:
-                # Error per-frame TIDAK fatal untuk app; catat ke log supaya
-                # terlihat (mis. konversi warna, numpy, atau analisis gagal).
-                # Tapi jangan spam: batasi frekuensi.
-                pass
+            self._last_pixels = pixels          # simpan buffer terbaru utk tombol
+            self._last_size = image_size
+            # Preview di-update tiap 2 frame (untuk device rendah), buffer tiap
+            # frame tetap disimpan untuk tombol. Tanpa cvtColor/detect per frame.
+            self._skip += 1
+            if self._skip % 2 != 0:
+                return
+            self._set_texture(pixels, image_size[0], image_size[1])
 
         @mainthread
         def _set_texture(self, rgba_bytes, w, h):
-            # Bebaskan texture lama dulu agar tidak bocor RAM (penggantian
-            # texture per-frame bisa membengkakkan memori kalau tidak dihapus).
-            if self._frame_texture is not None:
-                self._frame_texture = None
-            tex = Texture.create(size=(w, h), colorfmt="rgba")
-
+            # Pakai ulang texture bila ukurannya sama (hemat alokasi; blit ulang
+            # murah). Buat baru hanya bila ukuran berubah.
+            if (self._frame_texture is None
+                    or (self._frame_texture.width, self._frame_texture.height) != (w, h)):
+                tex = Texture.create(size=(w, h), colorfmt="rgba")
+                self._frame_texture = tex
+            tex = self._frame_texture
             tex.blit_buffer(rgba_bytes, colorfmt="rgba", bufferfmt="ubyte")
-
             tex.flip_vertical()
 
-            self._frame_texture = tex
+        # -- Tampilkan hasil analisis (still frame + HUD) ---------------------
+        @mainthread
+        def show_frame_oneshot(self, frame_bgr):
+            """Tampilkan frame yang dipakai menganalisis + HUD, sebagai still
+            (preview foto one-shot)."""
+            try:
+                h, w = frame_bgr.shape[:2]
+                rgba = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGBA)
+                self._set_texture(rgba.tobytes(), w, h)
+            except Exception:
+                pass
 
         # -- UI-thread rendering ---------------------------------------------
         def canvas_instructions_callback(self, texture, tex_size, tex_pos):
@@ -432,6 +592,10 @@ class AntiTimpaMobileApp(MDApp):
         self.client_city = None
         self.last_gps_coords = None
         self.is_fetching_city = False
+        self._captured = False          # one-shot: sudah ada hasil tangkapan?
+        self._processing = False        # one-shot: analisis sedang berjalan?
+        self._last_pixels = None        # frame kamera RGBA terakhir (utk tombol)
+        self._last_size = None          # (w, h) frame terakhir
 
         if self.dual:
             self.core = QrisScannerCore(blur_threshold=100.0, fifo_size=5)
@@ -522,9 +686,44 @@ class AntiTimpaMobileApp(MDApp):
         if gps:
             try:
                 gps.configure(on_location=self._on_location)
-                gps.start(minTime=10000, minDistance=50) # every 10s or 50m
+                gps.start(minTime=10000, minDistance=50)  # every 10s or 50m
             except Exception as e:
                 log_crash("GPS START ERROR", "Gagal start GPS.", e=e)
+        # Ambil lokasi terakhir yang dikenal (instant, tanpa menunggu fix GPS
+        # satelit). Ini membuat L3 cepat dapat kota walau di dalam ruangan.
+        self._try_last_known_location()
+
+    def _try_last_known_location(self):
+        """Ambil last-known location dari LocationManager (fused/network), lalu
+        masukkan ke alur yang sama dengan fix GPS. Berguna saat di dalam ruangan
+        dan GPS satelit belum dapat fix baru."""
+        if self.client_city and self.client_city != "LOADING":
+            return
+        try:
+            from jnius import autoclass
+            from plyer.platforms.android import activity
+            Looper = autoclass('android.os.Looper')
+            LocationManager = autoclass('android.location.LocationManager')
+            Context = autoclass('android.content.Context')
+            lm = activity.getSystemService(Context.LOCATION_SERVICE)
+            best = None
+            for provider in lm.getProviders(False).toArray():
+                try:
+                    loc = lm.getLastKnownLocation(provider)
+                    if loc is not None and (best is None or loc.getTime() > best.getTime()):
+                        best = loc
+                except Exception:
+                    pass
+            if best is not None:
+                lat = best.getLatitude()
+                lon = best.getLongitude()
+                _log_to_adb("ANTITIMPA", "LAST KNOWN LOC: lat=%s lon=%s" % (lat, lon))
+                self.last_gps_coords = (lat, lon)
+                # Panggil langsung (bukan lewat @mainthread) supaya pasti jalan.
+                self._fetch_city_from_coords(lat, lon)
+        except Exception as _e:
+            log_crash("LASTKNOWNNLOC ERROR", "Gagal ambil last-known location.", e=_e)
+
 
     @mainthread
     def _on_location(self, **kwargs):
@@ -540,6 +739,7 @@ class AntiTimpaMobileApp(MDApp):
         self.is_fetching_city = True
         if self.client_city is None:
             self.client_city = "LOADING"
+            _log_to_adb("ANTITIMPA", "GEOCODE: meminta kota utk %.5f,%.5f" % (lat, lon))
 
         url = f"https://nominatim.openstreetmap.org/reverse?lat={lat}&lon={lon}&format=json&zoom=10"
         try:
@@ -561,11 +761,15 @@ class AntiTimpaMobileApp(MDApp):
             city = address.get("city") or address.get("town") or address.get("county")
             if city:
                 self.client_city = city.upper()
-        except Exception:
-            pass
+                _log_to_adb("ANTITIMPA", "GEOCODE OK: kota=%s" % self.client_city)
+            else:
+                _log_to_adb("ANTITIMPA", "GEOCODE OK tapi kota kosong: address=%s" % address)
+        except Exception as e:
+            _log_to_adb("ANTITIMPA", "GEOCODE PARSE ERROR: %s" % str(e))
 
     def _on_city_fail(self, req, error):
         self.is_fetching_city = False
+        _log_to_adb("ANTITIMPA", "GEOCODE FAIL: %s" % str(error))
 
     def _set_status(self, msg):
         mode = self.root.ids.mode_label if self.root else None
@@ -659,14 +863,104 @@ class AntiTimpaMobileApp(MDApp):
             self.analyze_text_only()
             return
         if self.camera_ok:
-            # Kamera nyata sudah jalan via on_start; cukup perbarui hasil sekali.
-            if isinstance(self._preview_widget, CameraLivePreview):
-                self._set_status("Kamera aktif (Lokal). Arahkan ke QRIS.")
+            # Tombol "Ambil Foto QR": ambil SATU frame lalu analisis.
+            self.take_photo()
             return
         if not self.is_running:
             self.start_synthetic()
         else:
             self._tick(0)
+
+    def take_photo(self):
+        """One-shot: ambil frame kamera terakhir lalu analisis (seperti Import
+        Gambar, bedanya sumbernya kamera). Log rincian dikirim ke UI + adb
+        ANTITIMPA saat mulai dan saat selesai."""
+        if self._processing or self._captured:
+            _log_to_adb("ANTITIMPA", "take_photo: dilewati (processing/captured)")
+            self._notify("Sedang/sudah ada hasil. Ketuk lagi setelah siap.")
+            return
+
+        pw = self._preview_widget
+        if pw is None or getattr(pw, "_last_pixels", None) is None:
+            _log_to_adb("ANTITIMPA", "take_photo: belum ada frame kamera")
+            self._notify("Kamera belum mengirim frame.")
+            return
+
+        # Kalau ada payload tempelan, pakai itu saja (tanpa decode gambar).
+        pasted = self.pasted_raw()
+        if pasted:
+            frame_bgr = self._pixels_to_bgr()
+            if frame_bgr is None:
+                self._notify("Frame kamera tidak valid.")
+                return
+            snap = self.core.process_frame(
+                frame_bgr, optical_type="physical_camera_scan",
+                force_raw=pasted, client_city=self.client_city)
+            self._present_result(snap, frame_bgr)
+            return
+
+        self._processing = True
+        _log_to_adb("ANTITIMPA", "TAKE PHOTO START")
+        self._notify("Mengambil & menganalisis foto...")
+
+        def _work():
+            try:
+                frame_bgr = self._pixels_to_bgr()
+                if frame_bgr is None:
+                    _log_to_adb("ANTITIMPA", "TAKE PHOTO ERROR: frame invalid")
+                    return
+                h_img, w_img = frame_bgr.shape[:2]
+                _log_to_adb("ANTITIMPA", "frame: %dx%d" % (w_img, h_img))
+
+                result = QrisScannerCore.analyze_image(
+                    frame_bgr, optical_type="physical_camera_scan",
+                    client_city=self.client_city)
+                _log_to_adb("ANTITIMPA", "analyze_image ok=%s raww=%s" % (
+                    result.get('ok'), bool(result.get('raw'))))
+                if result.get('ok') and result.get('raw'):
+                    self._present_result(result['snapshot'], frame_bgr)
+                else:
+                    _log_to_adb("ANTITIMPA", "NO QR: " + str(
+                        result.get('error', 'tidak ada payload ter-decode')))
+                    self._notify("Tidak ada QR terbaca pada foto. Coba lagi.")
+            except Exception as _e:
+                log_crash("TAKE PHOTO ERROR", str(_e), e=_e,
+                          tb=_e.__traceback__, always_print=True)
+                _log_to_adb("ANTITIMPA", "TAKE PHOTO ERROR: %s" % str(_e))
+            finally:
+                self._processing = False
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _pixels_to_bgr(self):
+        """Ubah frame RGBA terakhir dari kamera menjadi numpy BGR, dengan
+        perkecilan bila perlu. Kembalikan None bila tidak valid."""
+        pw = self._preview_widget
+        px = getattr(pw, "_last_pixels", None)
+        size = getattr(pw, "_last_size", None)
+        if not isinstance(px, (bytes, bytearray, memoryview)) or not size:
+            return None
+        w, h = size
+        try:
+            rgba = np.frombuffer(px, dtype=np.uint8).reshape((h, w, 4))
+            bgr = cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGR)
+            return bgr
+        except Exception:
+            return None
+
+    def _present_result(self, snap, frame_bgr):
+        """Kirim snapshot ke UI + log detail ke adb, dan tunjukkan HUD pada
+        frame yang dipakai menganalisis."""
+        self._captured = True
+        self._snapshot = snap
+        self.post_snapshot(snap)
+        try:
+            pw = self._preview_widget
+            if frame_bgr is not None and pw is not None and hasattr(pw, 'show_frame_oneshot'):
+                pw.show_frame_oneshot(self._draw_hud(frame_bgr, snap))
+        except Exception:
+            pass
+        self._notify("Analisis foto selesai (log detail di layar & adb).")
 
     def analyze_text_only(self):
         raw = self.root.ids.payload_input.text.strip()
@@ -689,6 +983,8 @@ class AntiTimpaMobileApp(MDApp):
 
     def stop_work(self):
         self.is_running = False
+        self._captured = False
+        self._processing = False
         if self.notify_ev:
             self.notify_ev.cancel()
             self.notify_ev = None
@@ -777,8 +1073,12 @@ class AntiTimpaMobileApp(MDApp):
         if isinstance(preview, SyntheticPreview):
             preview.show_frame(frame_bgr)
 
-    def _apply_risk_style(self, title_lbl, score, crc_valid):
-        if not crc_valid:
+    def _apply_risk_style(self, title_lbl, score, crc_valid, risk_level=None):
+        risk_level = risk_level or "HIGH RISK (CRC gagal)" if not crc_valid else ("LOW RISK" if score < 0.35 else ("CAUTION" if score <= 0.70 else "HIGH RISK"))
+        if risk_level in ("MENUNGGU SCAN", "SCANNING", "NO QR"):
+            title_lbl.text = f"{risk_level}  |  Skor: {score:.3f}"
+            title_lbl.text_color = [0.6, 0.9, 0.9, 1]
+        elif not crc_valid:
             title_lbl.text = f"HIGH RISK (CRC gagal)  |  Skor: {score:.3f}"
             title_lbl.text_color = [1, 0.4, 0.4, 1]
         elif score < 0.35:
@@ -821,8 +1121,17 @@ class AntiTimpaMobileApp(MDApp):
         l1 = snap['l1']
         l2 = snap['l2']
         l3 = snap.get('l3', {})
-        self._apply_risk_style(title, snap['combined_score'], l2.get('crc_valid', True))
+        self._apply_risk_style(title, snap['combined_score'], l2.get('crc_valid', True), snap.get('combined_risk_level'))
         self._clear_box()
+
+        # Kirim log detail scan ke file + adb logcat, lalu tampilkan di UI.
+        try:
+            detail = log_scan_detail(snap)
+            lbl = self.root.ids.get("log_detail")
+            if lbl is not None:
+                lbl.text = detail
+        except Exception:
+            pass
 
         self._add_row("Layer 1 - Edge Density (margin)", f"{l1.get('spatial_edge_density', 0):.4f}")
         self._add_row("Layer 1 - Glare Variance", f"{l1.get('temporal_glare_var', 0):.5f}")
@@ -837,7 +1146,10 @@ class AntiTimpaMobileApp(MDApp):
         self._add_row("Layer 2 - Mode Inisiasi", l2.get('initiation_mode') or 'N/A')
 
         c_city = l3.get('client_city', 'N/A')
-        self._add_row("Layer 3 - Lokasi Klien", c_city)
+        if c_city in (None, '', 'N/A'):
+            c_city = 'N/A (izin/GPS belum aktif)'
+        self._add_row("Layer 3 - Lokasi QRIS", (l3.get('merchant_city') or l2.get('merchant_city') or 'N/A'))
+        self._add_row("Layer 3 - Lokasi User", c_city)
         self._add_row("Layer 3 - Geofence Status", l3.get('risk_level', 'N/A'))
         self._add_row("Layer 3 - Skor", f"{l3.get('l3_score', 0.0):.3f}")
 

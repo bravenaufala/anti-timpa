@@ -41,7 +41,7 @@ p4a.hook = camerax_provider/gradle_options.py
 # (str) Default orientation (landscape | portrait | portrait-reverse | landscape-reverse | all)
 # Use fullSensor (below) so the screen follows the device rotation.
 orientation = portrait
-android.manifest.orientation = fullSensor
+android.manifest.orientation = portrait
 
 # (bool) Indicate if the application should be fullscreen
 fullscreen = 0
