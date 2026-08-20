@@ -32,6 +32,29 @@ from layer2_emvco import process_layer2_tlv
 from layer3_geofence import process_layer3_geofence
 
 
+# --------------------------------------------------------------------------
+# Diagnostic logging (KE logcat / stderr saja, TIDAK ditampilkan di UI app).
+# Dipakai untuk menelusuri kenapa QR yang jelas sering gagal terdeteksi.
+# --------------------------------------------------------------------------
+def _diag(tag: str, msg: str):
+    """Kirim pesan diagnostik detail ke logcat (Android) / stderr (desktop).
+    Ini tidak di-render ke UI; hanya untuk debugging lewat adb."""
+    full = "[%s] %s" % (tag, msg)
+    try:
+        from jnius import autoclass
+        android_log = autoclass("android.util.Log")
+        android_log.d("ANTITIMPA_DIAG", full)
+        return
+    except Exception:
+        pass
+    try:
+        import sys
+        sys.stderr.write(full + "\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
+
+
 class QrisScannerCore:
     """
     On-device QRIS security scanner engine.
@@ -108,6 +131,17 @@ class QrisScannerCore:
         qr_bbox = None
         poly_points = None
 
+        _diag("QR", "detect_qr enter aggressive=%s frame=%s dtype=%s" % (
+            aggressive, getattr(frame, "shape", None), getattr(frame, "dtype", None)))
+        # statistik dasar utk memastikan frame tidak kosong / format salah
+        try:
+            f_avg = float(np.mean(frame))
+            f_min = float(frame.min())
+            f_max = float(frame.max())
+        except Exception:
+            f_avg = f_min = f_max = float("nan")
+        _diag("QR", "  stats mean=%.1f min=%.1f max=%.1f" % (f_avg, f_min, f_max))
+
         # helper untuk mengekstrak hasil detection
         def _extract(points, decoded_info=None):
             nonlocal qr_bbox, poly_points, raw_qris_str
@@ -131,12 +165,22 @@ class QrisScannerCore:
         # 1) jalur ringan / live: satu panggilan saja
         try:
             retval, info, points, _ = self.qr_detector.detectAndDecodeMulti(frame)
+            _diag("QR", "  stage=lite detectAndDecodeMulti retval=%s pts=%s decoded=%s" % (
+                retval, (None if points is None else len(points)),
+                (None if info is None else len(info))))
             if retval and _extract(points, info):
-                return qr_bbox, poly_points, raw_qris_str
-        except Exception:
-            pass
+                _diag("QR", "  stage=lite bbox=%s raw_len=%d" % (qr_bbox, len(raw_qris_str)))
+                if raw_qris_str or not aggressive:
+                    _diag("QR", "  RESULT=HIT (lite) bbox=%s raw_len=%d" % (qr_bbox, len(raw_qris_str)))
+                    return qr_bbox, poly_points, raw_qris_str
+                # aggressive TAPI payload masih kosong: jatuh ke fallback agar
+                # peluang menerjemahkan isi QR (pyzbar / crop+upscale) tidak hilang.
+                _diag("QR", "  stage=lite bbox tanpa payload -> lanjut fallback")
+        except Exception as _e:
+            _diag("QR", "  stage=lite EXC %r" % _e)
 
         if not aggressive:
+            _diag("QR", "  RESULT=MISS (non-aggressive) bbox=%s" % (qr_bbox,))
             return qr_bbox, poly_points, raw_qris_str
 
         # ---- aggressive (import gambar): pakai pyzbar dulu (paling andal) ----
@@ -144,12 +188,15 @@ class QrisScannerCore:
         try:
             from pyzbar import pyzbar as _pyzbar
             from PIL import Image as _PIL
+            _diag("QR", "  stage=pyzbar try")
             pil_img = _PIL.fromarray(frame)
             decoded = _pyzbar.decode(pil_img)
+            _diag("QR", "  stage=pyzbar decoded=%s" % (len(decoded) if decoded else 0))
             if decoded:
                 b = decoded[0]
                 raw_str = (b.data or b"").decode("utf-8", "replace")
                 left, top, ww, hh = b.rect
+                _diag("QR", "  stage=pyzbar rect=%dx%d+%d+%d raw_len=%d" % (ww, hh, left, top, len(raw_str)))
                 if ww > 5 and hh > 5:
                     pts_py = np.array([[left, top],
                                        [left + ww, top],
@@ -157,9 +204,10 @@ class QrisScannerCore:
                                        [left, top + hh]], dtype=np.float32)
                     pts_py = pts_py.reshape(1, 4, 2)
                     if _extract(pts_py, raw_str):
+                        _diag("QR", "  RESULT=HIT (pyzbar) bbox=%s" % (qr_bbox,))
                         return qr_bbox, poly_points, raw_qris_str
-        except Exception:
-            pass
+        except Exception as _e:
+            _diag("QR", "  stage=pyzbar EXC %r" % _e)
 
         # siapkan versi praproses
         try:
@@ -167,7 +215,8 @@ class QrisScannerCore:
                 gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             else:
                 gray = frame.copy()
-        except Exception:
+        except Exception as _e:
+            _diag("QR", "  stage=gray EXC %r" % _e)
             gray = None
 
         candidates = []
@@ -192,6 +241,7 @@ class QrisScannerCore:
                 # Saat import gambar, coba juga upscale 2x utk memudahkan
                 # deteksi QR yang kecil di dalam foto galeri yang besar.
                 scales.append(2.0)
+            _diag("QR", "  stage=scale cand=%s size=%dx%d scales=%s" % (name, w_img, h_img, scales))
             for s in scales:
                 try:
                     work = img
@@ -199,14 +249,17 @@ class QrisScannerCore:
                         work = cv2.resize(img, (int(w_img * s), int(h_img * s)),
                                           interpolation=cv2.INTER_CUBIC)
                     raw_str, pts, _ = self.qr_detector.detectAndDecode(work)
+                    _diag("QR", "  stage=decode cand=%s scale=%s pts=%s raw_len=%d" % (
+                        name, s, (None if pts is None else len(pts)), len(raw_str or "")))
                     if pts is not None and len(pts) >= 4:
                         # bila digubah skala, peta koordinat kembali ke skala asli
                         if s != 1.0:
                             pts = pts / s
                         if _extract(pts, raw_str):
+                            _diag("QR", "  RESULT=HIT (scale) bbox=%s" % (qr_bbox,))
                             return qr_bbox, poly_points, raw_qris_str
-                except Exception:
-                    continue
+                except Exception as _e:
+                    _diag("QR", "  stage=decode EXC %r" % _e)
 
         # 3) aggressive: deteksi lokasi QR lewat .detect(), lalu crop area & upscale
         #    sebelum decode. QR kecil di dalam foto besar kerap gagal di-decode
@@ -215,6 +268,8 @@ class QrisScannerCore:
             h_img, w_img = gray.shape[:2]
             try:
                 found, pts = self.qr_detector.detect(gray)
+                _diag("QR", "  stage=locate detect() found=%s groups=%s" % (
+                    found, (0 if pts is None else (1 if pts.ndim == 2 else len(pts)))))
                 if found and pts is not None:
                     for group in (pts if pts.ndim == 3 else [pts]):
                         try:
@@ -228,6 +283,7 @@ class QrisScannerCore:
                             x1 = min(w_img, bx + bw + pad)
                             y1 = min(h_img, by + bh + pad)
                             crop = gray[y0:y1, x0:x1]
+                            _diag("QR", "  stage=locate crop rect=%dx%d+%d+%d size=%s" % (bw, bh, bx, by, crop.shape))
                             if crop.size == 0:
                                 continue
                             # upscale supaya sisi terpanjang >= ~300px (agar ter-decode)
@@ -239,17 +295,20 @@ class QrisScannerCore:
                                     interpolation=cv2.INTER_CUBIC,
                                 )
                             raw_str, dpts, _ = self.qr_detector.detectAndDecode(crop)
+                            _diag("QR", "  stage=locate decode scale=%.1f raw_len=%d" % (scale, len(raw_str or "")))
                             if raw_str and dpts is not None and len(dpts) >= 4:
                                 pts_abs = dpts / scale if scale > 1.0 else dpts
                                 pts_abs[:, :, 0] += x0
                                 pts_abs[:, :, 1] += y0
                                 if _extract(pts_abs, raw_str):
+                                    _diag("QR", "  RESULT=HIT (locate) bbox=%s" % (qr_bbox,))
                                     return qr_bbox, poly_points, raw_qris_str
-                        except Exception:
-                            continue
-            except Exception:
-                pass
+                        except Exception as _e:
+                            _diag("QR", "  stage=locate group EXC %r" % _e)
+            except Exception as _e:
+                _diag("QR", "  stage=locate EXC %r" % _e)
 
+        _diag("QR", "  RESULT=MISS (aggressive) bbox=%s raw_len=%d" % (qr_bbox, len(raw_qris_str)))
         return qr_bbox, poly_points, raw_qris_str
 
     def process_frame(
@@ -401,7 +460,10 @@ class QrisScannerCore:
         client_city through to Layer 3 (geofence) so user location is used.
         """
         bbox, _, raw_str = QrisScannerCore().detect_qr(frame_bgr, aggressive=True)
-        if bbox is None:
+        # Keberhasilan harus berbasis PAYLOAD QR yang terbaca (raw_str), bukan
+        # sekadar bbox. OpenCV kadang menemukan bbox QR tapi gagal menerjemahkan
+        # isinya (raw kosong) -> artinya tidak ada QRIS valid yang terdeteksi.
+        if bbox is None or not raw_str:
             return {'ok': False, 'error': 'No QR code detected in image', 'snapshot': None}
 
         core = QrisScannerCore(blur_threshold=blur_threshold)

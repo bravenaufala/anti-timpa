@@ -91,43 +91,6 @@ def _log_to_adb(tag, msg):
         pass
 
 
-def log_scan_detail(snap):
-    """Bangun string log detail dari snapshot."""
-    l1 = snap.get('l1', {})
-    l2 = snap.get('l2', {})
-    l3 = snap.get('l3', {})
-    crc_valid = l2.get('crc_valid', False)
-    crc_txt = "VALID" if crc_valid else "GAGAL"
-
-    qris_city = (l3.get('merchant_city') or l2.get('merchant_city') or None)
-    client_city = l3.get('client_city')
-
-    lines = [
-        "===== SCAN %s ====" % datetime.now().strftime("%H:%M:%S"),
-        "QR: %s" % (snap.get('raw_qris_str') or "(kosong)"),
-        "Blur: var=%.1f %s" % (snap.get('blur_var', 0), "BLUR" if snap.get('is_blurry') else "CLEAR"),
-        "L1 optik: edge=%.4f glare=%.5f skor=%.3f (%s)" % (
-            l1.get('spatial_edge_density', 0), l1.get('temporal_glare_var', 0),
-            l1.get('l1_score', 0), l1.get('risk_level', 'N/A')),
-        "L2 EMVCo: TLV=%s CRC=%s" % (
-            "VALID" if l2.get('parsed_tlv', {}).get('valid') else "INVALID",
-            crc_txt),
-        "L2: merchant=%s kota=%s mcc=%s mode=%s" % (
-            l2.get('merchant_name') or "N/A", l2.get('merchant_city') or "N/A",
-            l2.get('mcc') or "N/A", l2.get('initiation_mode') or "N/A"),
-        "LOKASI QRIS: %s" % (qris_city or "N/A"),
-        "LOKASI USER: %s" % (client_city or "TIDAK ADA"),
-        "L3 geofence: skor=%.2f status=%s" % (l3.get('l3_score', 0), l3.get('risk_level', "N/A")),
-        "GABUNGAN: skor=%.3f risk=%s" % (snap.get('combined_score', 0), snap.get('combined_risk_level', 'N/A')),
-        "Warnings: %s" % ("; ".join((l2.get('warnings') or []) + (l3.get('warnings') or [])) or "tidak ada"),
-    ]
-    detail = "\n".join(lines)
-    log_crash("SCAN", detail)
-    for line in lines:
-        _log_to_adb("ANTITIMPA", line)
-    return detail
-
-
 def _install_crash_hooks():
     sys_excepthook = sys.excepthook
 
@@ -411,8 +374,6 @@ _KV_PREVIEW_REAL = '''
                     id: preview
                     size_hint: 1, 1
                     pos_hint: {"center_x": 0.5, "center_y": 0.5}
-                    aspect_ratio: '4:3'
-                    letterbox_color: 0.953, 0.961, 0.969, 1
 '''
 
 _KV_PREVIEW_SYN = '''
@@ -451,17 +412,6 @@ _KV_COMMON_BODY = '''
 
             Widget:
                 size_hint_x: 1
-
-            MDFillRoundFlatButton:
-                id: shoot_qr_btn
-                text: "Shoot QR"
-                md_bg_color: 0.22, 0.25, 0.30, 1
-                theme_text_color: "Custom"
-                text_color: 1, 1, 1, 1
-                font_size: "12sp"
-                size_hint_y: None
-                height: "36dp"
-                on_release: app.start_or_analyze()
 
             MDFillRoundFlatButton:
                 id: toggle_log_btn
@@ -511,6 +461,7 @@ _KV_COMMON_BODY = '''
             spacing: "4dp"
 
             MDBoxLayout:
+                id: info_box
                 orientation: "vertical"
                 adaptive_height: True
                 spacing: "3dp"
@@ -559,6 +510,19 @@ _KV_COMMON_BODY = '''
                 size_hint_y: 0.1
 
             MDLabel:
+                id: qris_value_label
+                text: "Nilai QRIS: -"
+                bold: False
+                halign: "center"
+                font_size: "13sp"
+                theme_text_color: "Custom"
+                text_color: 0.10, 0.12, 0.16, 1
+                size_hint_y: None
+                height: dp(28)
+                text_size: self.width, None
+
+            MDLabel:
+                id: score_title_label
                 text: "QRIS Detection Score"
                 bold: True
                 halign: "center"
@@ -589,19 +553,15 @@ _KV_COMMON_BODY = '''
                     height: self.texture_size[1]
 
         # --- Bottom Floating Controls Bar ---
-        MDBoxLayout:
-            orientation: "horizontal"
+        MDFloatLayout:
             size_hint_y: None
             height: "72dp"
-            padding: ["24dp", 0, "24dp", 0]
-            spacing: "16dp"
-
-            Widget:
-                size_hint_x: 0.35
 
             ShutterButton:
                 id: shutter_btn
-                pos_hint: {"center_y": 0.5}
+                size_hint: None, None
+                size: "72dp", "72dp"
+                pos_hint: {"center_x": 0.5, "center_y": 0.5}
                 on_release: app.start_or_analyze()
 
             MDIconButton:
@@ -609,7 +569,9 @@ _KV_COMMON_BODY = '''
                 icon_size: "38dp"
                 theme_text_color: "Custom"
                 text_color: 0.0, 0.76, 0.96, 1
-                pos_hint: {"center_y": 0.5}
+                size_hint: None, None
+                size: "48dp", "48dp"
+                pos_hint: {"center_x": 0.9, "center_y": 0.5}
                 on_release: app.import_image()
 
         # --- Bottom Home Indicator Bar ---
@@ -636,57 +598,77 @@ _KV_NONE = _KV_COMMON_HEADER + _KV_PREVIEW_NONE + _KV_COMMON_BODY
 # --------------------------------------------------------------------------
 if CAMERA4KIVY:
     class CameraLivePreview(C4KPreview):
-        """Analyze real camera frames through the dual-layer engine."""
+        """Analyze real camera frames through the dual-layer engine.
+
+        Live video dirender NATIVELY oleh Camera4Kivy sehingga orientasi dan
+        mirror sudah benar serta mengisi penuh widget (via configure_viewport).
+        Widget ini hanya menangkap frame untuk analisis QR on-demand dan,
+        saat foto diambil, menggambar overlay HUD (kotak deteksi) di atasnya.
+
+        Perbaikan bug: dulu terdapat overlay `_frame_texture` yang melakukan
+        blit + flip_vertical() pada SETIAP frame. Karena flip_vertical() di
+        Kivy bersifat meng-toggle koordinat UV (bukan membalik data), memanggil
+        tiap frame membuat orientasi berganti-ganti tiap frame -> video selalu
+        terbalik vertikal & tampak glitch. Overlay itu dihapus; preview live
+        cukup ditangani native, dan flip hanya dilakukan sekali di
+        show_frame_oneshot() saat membuat tekstur overlay.
+        """
 
         def __init__(self, app_ref=None, **kwargs):
             super().__init__(**kwargs)
             self._app = app_ref
-            self._frame_texture = None
-            self._frame_rect = None
-            self._skip = 0
             self._last_pixels = None
             self._last_size = None
+            self._hud_rect = None
+            self._hud_texture = None
+            # Posisi/ukuran area gambar dalam widget (untuk menempatkan overlay HUD).
+            self._preview_region = (0, 0, 0, 0)
 
         def analyze_pixels_callback(self, pixels, image_size, image_pos,
                                     image_scale, mirror):
             app = self._app
             if app is None or not app.dual:
                 return
+            # Hanya simpan frame terbaru untuk analisis QR on-demand (take_photo).
+            # Preview live sudah dirender native oleh Camera4Kivy.
             self._last_pixels = pixels
             self._last_size = image_size
 
-            self._skip += 1
-            if self._skip % 2 != 0:
-                return
-            self._set_texture(pixels, image_size[0], image_size[1])
-
-        @mainthread
-        def _set_texture(self, rgba_bytes, w, h):
-            if (self._frame_texture is None
-                    or (self._frame_texture.width, self._frame_texture.height) != (w, h)):
-                tex = Texture.create(size=(w, h), colorfmt="rgba")
-                self._frame_texture = tex
-            tex = self._frame_texture
-            tex.blit_buffer(rgba_bytes, colorfmt="rgba", bufferfmt="ubyte")
-            tex.flip_vertical()
+        def canvas_instructions_callback(self, texture, tex_size, tex_pos):
+            # Jangan menggambar overlay per-frame (agar tidak glitch).
+            # Cukup catat area gambar untuk keperluan overlay HUD pada foto.
+            if tex_size and tex_pos:
+                self._preview_region = (tex_pos[0], tex_pos[1],
+                                        tex_size[0], tex_size[1])
 
         @mainthread
         def show_frame_oneshot(self, frame_bgr):
+            """Tampilkan satu hasil analisis (HUD) di atas preview live.
+
+            Tekstur dibuat & di-flip HANYA SEKALI sehingga orientasi stabil.
+            """
             try:
                 h, w = frame_bgr.shape[:2]
                 rgba = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGBA)
-                self._set_texture(rgba.tobytes(), w, h)
+                tex = Texture.create(size=(w, h), colorfmt="rgba")
+                tex.blit_buffer(rgba.tobytes(), colorfmt="rgba", bufferfmt="ubyte")
+                tex.flip_vertical()  # sekali saja: orientasi menjadi benar & tetap.
+                self._hud_texture = tex
+                px, py, pw, ph = self._preview_region
+                if pw <= 0 or ph <= 0:
+                    px, py, pw, ph = self.pos[0], self.pos[1], self.width, self.height
+                self.canvas.after.clear()
+                with self.canvas.after:
+                    Color(1, 1, 1, 1)
+                    self._hud_rect = Rectangle(texture=tex, pos=(px, py),
+                                               size=(pw, ph))
             except Exception:
                 pass
 
-        def canvas_instructions_callback(self, texture, tex_size, tex_pos):
-            if self._frame_texture is None:
-                return
-            self.canvas.after.clear()
-            with self.canvas.after:
-                Color(1, 1, 1, 1)
-                self._frame_rect = Rectangle(texture=self._frame_texture,
-                                             pos=tex_pos, size=tex_size)
+        def configure_viewport(self):
+            """Fill seluruh area widget: preview menutupi seluruh div (center-crop)."""
+            self.view_size = (round(self.width), round(self.height))
+            self.view_pos = [self.pos[0], self.pos[1]]
 
         def connect(self):
             self.connect_camera(enable_analyze_pixels=True,
@@ -771,6 +753,10 @@ class AntiTimpaMobileApp(MDApp):
                 pw._app = self
                 self._preview_widget = pw
 
+        self._apply_log_visibility()
+        # Saat belum memfoto (default) jangan tampilkan log maupun skor QR.
+        self._reset_result_ui()
+
         return self.root
 
     def _start_camera(self):
@@ -783,6 +769,7 @@ class AntiTimpaMobileApp(MDApp):
         self.is_running = True
 
     def on_start(self):
+        self._reset_result_ui()
         self._show_latest_log()
         if self.camera_ok:
             try:
@@ -884,7 +871,10 @@ class AntiTimpaMobileApp(MDApp):
         self.is_fetching_city = False
         _log_to_adb("ANTITIMPA", "GEOCODE FAIL: %s" % str(error))
 
+    @mainthread
     def _notify(self, msg):
+        """Tampilkan pesan status pada log umum. Dijalankan di main-thread
+        UI agar aman dipanggil dari thread analisis (take_photo)."""
         log_crash("NOTIFY", str(msg))
         try:
             log_lbl = self.root.ids.get("log_detail")
@@ -934,6 +924,60 @@ class AntiTimpaMobileApp(MDApp):
                 log_card.disabled = True
                 if toggle_btn:
                     toggle_btn.text = "Tampilkan Log"
+
+        self._apply_log_visibility()
+
+    def _apply_log_visibility(self):
+        """Atur visibilitas area hasil & log:
+        - log (info_box + log_card) tampil penuh hanya saat show_log aktif;
+        - nilai QRIS & gauge skor hanya muncul setelah ada hasil scan
+          (self._captured == True), sehingga sebelum memfoto semuanya kosong."""
+        ids = self.root.ids if self.root else {}
+        show_full = bool(getattr(self, 'show_log', False))
+        has_result = bool(getattr(self, '_captured', False))
+        if 'info_box' in ids:
+            ids.info_box.opacity = 1 if show_full else 0
+            ids.info_box.disabled = not show_full
+        if 'score_title_label' in ids:
+            ids.score_title_label.opacity = 1 if (show_full and has_result) else 0
+        # Nilai QRIS & gauge skor hanya muncul setelah ada hasil scan.
+        if 'qris_value_label' in ids:
+            ids.qris_value_label.opacity = 1 if has_result else 0
+        if 'score_gauge' in ids:
+            ids.score_gauge.opacity = 1 if has_result else 0
+        if 'risk_status_badge' in ids:
+            ids.risk_status_badge.opacity = 1 if has_result else 0
+        if 'log_card' in ids:
+            ids.log_card.opacity = 1 if show_full else 0
+
+    @mainthread
+    def _reset_result_ui(self):
+        """Kosongkan seluruh area hasil & log (state sebelum memfoto).
+        Dipanggil saat aplikasi pertama kali dibuka supaya belum ada foto
+        tidak menampilkan log detail maupun skor QR."""
+        ids = self.root.ids if self.root else {}
+        defaults = {
+            'merchant_name_label': 'Nama Merchant: -',
+            'merchant_loc_label': 'Lokasi Merchant: -',
+            'edge_score_label': 'Edge Detection Score: -',
+            'l2_score_label': 'L2 Score: -',
+        }
+        for name, text in defaults.items():
+            if name in ids:
+                ids[name].text = text
+        if 'qris_value_label' in ids:
+            ids.qris_value_label.text = 'Nilai QRIS: -'
+        if 'score_gauge' in ids:
+            ids.score_gauge.score_text = ''
+        if 'risk_status_badge' in ids:
+            ids.risk_status_badge.text = ''
+        hint_lbl = ids.get('camera_hint_label')
+        if hint_lbl:
+            hint_lbl.opacity = 0.75
+        log_lbl = ids.get('log_detail')
+        if log_lbl:
+            log_lbl.text = ''
+        self._apply_log_visibility()
 
     # ------------------------------------------------------------------
     # Snapshot rendering
@@ -986,10 +1030,19 @@ class AntiTimpaMobileApp(MDApp):
 
         def _work():
             try:
+                # Ambil snapshot terbaru dari kamera (RGBA bytes) di dalam thread
+                # agar konversi & analisis tidak memblokir UI.
                 frame_bgr = self._pixels_to_bgr()
                 if frame_bgr is None:
                     self._notify("Frame kamera tidak valid.")
                     return
+
+                try:
+                    _log_to_adb("ANTITIMPA", "TAKE PHOTO frame shape=%s dtype=%s mean=%.1f min=%.1f max=%.1f" % (
+                        frame_bgr.shape, frame_bgr.dtype,
+                        float(frame_bgr.mean()), float(frame_bgr.min()), float(frame_bgr.max())))
+                except Exception:
+                    pass
 
                 result = QrisScannerCore.analyze_image(
                     frame_bgr, optical_type="physical_camera_scan",
@@ -999,6 +1052,8 @@ class AntiTimpaMobileApp(MDApp):
                     self._present_result(result['snapshot'], frame_bgr)
                 else:
                     _log_to_adb("ANTITIMPA", "NO QR TERDETEKSI")
+                    self._captured = False
+                    self._reset_result_ui()
                     self._notify("Tidak ada QR terbaca pada frame. Arahkan lebih dekat.")
             except Exception as _e:
                 log_crash("TAKE PHOTO ERROR", str(_e), e=_e,
@@ -1022,6 +1077,7 @@ class AntiTimpaMobileApp(MDApp):
         except Exception:
             return None
 
+    @mainthread
     def _present_result(self, snap, frame_bgr):
         self._captured = True
         self._snapshot = snap
@@ -1160,6 +1216,13 @@ class AntiTimpaMobileApp(MDApp):
             crc_str = "VALID CRC" if crc_valid else "INVALID CRC"
             ids.l2_score_label.text = f"L2 Score: {l2_score_val:.2f} ({crc_str})"
 
+        qris_val = snap.get('raw_qris_str') or '(belum ada QR terdeteksi)'
+        if 'qris_value_label' in ids:
+            ids.qris_value_label.text = f"Nilai QRIS: {qris_val}"
+
+        # Terapkan visibilitas sesuai state Tampilkan/Sembunyikan Log
+        self._apply_log_visibility()
+
         # Sembunyikan placeholder hint jika QR terdeteksi
         hint_lbl = ids.get('camera_hint_label')
         if hint_lbl:
@@ -1197,14 +1260,39 @@ class AntiTimpaMobileApp(MDApp):
             badge.text = badge_text
             badge.text_color = gauge_col
 
-        # 3. Update isi log detail
+        # 3. Update isi log detail (hanya log umum — tanpa baris teknis/system)
         try:
-            detail = log_scan_detail(snap)
             log_lbl = ids.get("log_detail")
             if log_lbl:
-                log_lbl.text = detail
+                log_lbl.text = self._general_scan_log(snap)
         except Exception:
             pass
+
+    def _general_scan_log(self, snap):
+        """Sajikan log UMUM saja (hasil scan QRIS) untuk UI — menyembunyikan
+        baris teknis/system seperti blur var, L1 edge/glare, dan TLV intern."""
+        l2 = snap.get('l2', {})
+        l3 = snap.get('l3', {})
+        crc_valid = l2.get('crc_valid', False)
+        crc_txt = "VALID" if crc_valid else "GAGAL"
+
+        qris_city = (l3.get('merchant_city') or l2.get('merchant_city') or None)
+        client_city = l3.get('client_city')
+
+        lines = [
+            "===== SCAN %s ====" % datetime.now().strftime("%H:%M:%S"),
+            "Nilai QRIS: %s" % (snap.get('raw_qris_str') or '(kosong)'),
+            "Merchant: %s" % (l2.get('merchant_name') or "N/A"),
+            "Lokasi QRIS: %s" % (qris_city or "N/A"),
+            "Lokasi Anda: %s" % (client_city or "TIDAK ADA"),
+            "Status CRC: %s" % crc_txt,
+            "Skor Risiko: %.0f%%" % (round(max(0.0, min(1.0, snap.get('combined_score', 0))) * 100)),
+            "Tingkat: %s" % snap.get('combined_risk_level', 'N/A'),
+        ]
+        warnings = (l2.get('warnings') or []) + (l3.get('warnings') or [])
+        if warnings:
+            lines.append("Peringatan: %s" % "; ".join(warnings))
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------
     # Import Gambar dari Galeri
