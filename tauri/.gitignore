@@ -1,0 +1,15 @@
+# Dependencies
+node_modules/
+src-tauri/target/
+dist/
+
+# Generated Tauri schemas
+src-tauri/gen/
+
+# Local env
+.env
+.env.local
+
+# Editor / OS
+.DS_Store
+*.log
