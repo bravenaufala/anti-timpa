@@ -1,128 +1,135 @@
-# 📥 Panduan Instalasi Anti Timpa QRIS
+# Panduan Instalasi — Anti Timpa QRIS Scanner
 
 Panduan praktis mem-build & menjalankan aplikasi di **Desktop**, **Android**, dan
-**iOS**. Semua analisis (Layer 1 optik + Layer 2 EMVCo) berjalan **lokal di
-perangkat** — tanpa server, tanpa cloud. Aplikasi dapat **scan berkali-kali**
-dan risiko/merchant berubah setiap kali kamera menunjuk QR.
+**iOS**. Semua analisis berjalan **lokal di perangkat** — tanpa server, tanpa
+cloud. Aplikasi dapat **scan berkali-kali** dan risiko/merchant berubah setiap
+kali kamera menunjuk QR.
+
+> Versi lama aplikasi ini adalah Python/KivyMD. **Kode Python sudah dihapus**;
+> sekarang React + Tauri + Rust (lihat [`README.md`](README.md)). Dokumen ini
+> sudah disesuaikan.
 
 ---
 
 ## 🖥️ Desktop (Windows / macOS / Linux)
 
-**Persyaratan:** Python 3.10 – 3.12, webcam.
+**Persyaratan:** Node.js 18+, Rust 1.77.2+, webcam. Di Linux juga butuh
+`libwebkit2gtk-4.1-dev` dan `libv4l-dev`.
 
 ```bash
-# 1) Buat venv + pasang dependensi
-python -m venv .venv && source .venv/bin/activate
-pip install -r app/requirements-desktop.txt
+# 1) Pasang dependensi frontend + Tauri CLI (lokal, di node_modules)
+npm install
 
-# 2) Jalankan (entry: app/main.py -> dialihkan ke main_desktop)
-./run_desktop.sh
+# 2) Jalankan aplikasi penuh (React + Rust)
+npm run tauri:dev
 ```
 
-Atau langsung tanpa script:
+Atau langsung tanpa CLI global:
+
 ```bash
-python app/main.py
+npx tauri dev
 ```
 
-**Opsional: ganti kamera** (default index `0`):
-```bash
-CAMERA_SOURCE=2 ./run_desktop.sh
-```
-
-> Jika webcam tidak ada, app otomatis masuk **mode demo sintetik**.
+> Jika webcam tidak ada, app otomatis masuk **mode demo sintetik**; panel kamera
+> menandainya dengan chip "simulasi". Kamera desktop tidak selalu di `/dev/video0`
+> — lihat bagian "Pratinjau Kamera Langsung" di `README.md`.
 
 ---
 
 ## 🤖 Android (APK)
 
-**Persyaratan:** Linux + `buildozer`, Java 17, Android SDK/NDK. Jalur ini sudah
-teruji di mesin Linux (lihat daftar toolchain di `BUILD.md`).
+**Persyaratan:** Android SDK + NDK, keystore rilis, Node.js + Rust.
 
-### 1. Siapkan environment build
 ```bash
-python3.12 -m venv .venv-android
-.venv-android/bin/pip install --upgrade buildozer
-
-# Wajib: Java 17 + venv di PATH (VIRTUAL_ENV harus .venv-android)
-export VIRTUAL_ENV="$PWD/.venv-android"
-export PATH="$VIRTUAL_ENV/bin:/home/linuxbrew/.linuxbrew/opt/openjdk@17/bin:$PATH"
-export JAVA_HOME="/home/linuxbrew/.linuxbrew/opt/openjdk@17"
-export ANDROID_SDK_ROOT="$HOME/Android/Sdk"
 export ANDROID_HOME="$HOME/Android/Sdk"
+export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/<versi>"
+
+# Build + tanda tangani
+./build-apk.sh
+
+# Build + sign + pasang ke perangkat yang terhubung
+./build-apk.sh --install
 ```
 
-### 2. Bangun APK
-```bash
-buildozer android debug
-```
-Hasil: **`bin/antitimpa-0.1.0-arm64-v8a-debug.apk`** (~100 MB).
+Hasil: **`dist-apk/antitimpa-release.apk`** (~8–9 MB).
 
-### 3. Install ke HP (USB / ADB Wi-Fi)
-```bash
-adb install -r bin/antitimpa-0.1.0-arm64-v8a-debug.apk
-# beri izin kamera
-adb shell pm grant org.antitimpa.antitimpa android.permission.CAMERA
-```
-Buka aplikasi; pertama kali beri izin kamera/penyimpanan saat diminta.
+`build-apk.sh` sengaja memverifikasi simbol JNI di `.so` rilis **sebelum**
+menandatangani, karena build release memakai LTO + `strip = true` yang menghapus
+entry point JNI bila `build.rs` tidak memaksanya tetap ada. Kegagalannya hanya
+akan terlihat di perangkat sebagai `UnsatisfiedLinkError` saat kamera pertama
+dipanggil.
 
-> **Kamera nyata aktif** via Camera4Kivy (CameraX). **Import gambar** memakai
-> `pyzbar`/zbar → bisa baca QR kecil di foto galeri.
+### 3. Memasang jembatan kamera CameraX
+
+Frame kamera Android masuk lewat JNI. Pasang di `src-tauri/gen/android/`:
+
+1. dependensi CameraX di `app/build.gradle.kts`,
+2. izin `CAMERA` di `AndroidManifest.xml`,
+3. salin `android/CameraBridge.kt` + `android/CameraFrameAnalyzer.kt` ke
+   `app/src/main/java/org/antitimpa/antitimpa/`,
+4. panggil `CameraBridge` dari `MainActivity`.
+
+Langkah lengkap + tabel diagnostik ada di
+**[`android/README.md`](android/README.md)**. **Jembatan ini belum pernah
+diverifikasi di perangkat nyata** — hanya sisi Rust-nya yang sudah diuji di host.
 
 ### Cek log (jika crash / error)
+
 ```bash
-adb shell run-as org.antitimpa.antitimpa cat files/antitimpa.log
-adb logcat -d | grep -iE "python|Camera|FATAL|Traceback"
+adb logcat -s ANTITIMPA
 ```
+
+Tag `ANTITIMPA` sengaja dipertahankan sama seperti aplikasi lama, sehingga
+kebiasaan dan alat diagnostik yang sudah ada tetap berlaku.
 
 ---
 
 ## 🍎 iOS (IPA)
 
-**Persyaratan:** **macOS** + Xcode + Homebrew. Build iOS **tidak bisa** dari
-Windows/Linux.
+Bisa dibangun dari mana saja dengan `npx tauri ios build`, tetapi:
 
-### 1. Pasang toolchain Kivy-iOS & dependensi
-```bash
-python3 -m pip install kivy-ios
-toolchain build python3 kivy kivymd numpy opencv pillow plyer
-```
-
-### 2. Buat project Xcode dari folder `app/`
-```bash
-toolchain create AntiTimpa app
-toolchain build AntiTimpa
-toolchain link AntiTimpa <ios-deploy|simulator>
-```
-
-### 3. Buat IPA & install
-Buka `AntiTimpa-ios/AntiTimpa.xcodeproj` di Xcode, pilih team Apple Developer,
-lalu **Run** ke device/simulator, atau **Archive** → hasil `.ipa`.
-
-> **Catatan kamera iOS:** iOS belum mengekspos frame numpy mentah ke Python
-> lewat kamera Kivy bawaan; saat ini memakai **mode demo sintetik**. Untuk
-> frame kamera iOS asli butuh bridge native (ada di README "Roadmap").
-> Layer 1 + Layer 2 tetap berjalan lokal di device.
+> **Catatan kamera iOS:** belum ada bridge AVFoundation, jadi kamera iOS belum
+> berfungsi. Layer 2 + Layer 3 tetap berjalan lokal di perangkat, dan Layer 1
+> memakai backend sintetik.
 
 ---
 
-## 🔍 Verifikasi cepat (tanpa build, Linux)
+## 🔍 Verifikasi cepat (tanpa build penuh)
+
 ```bash
-python3 test_layer1.py   # Layer 1 optik
-python3 test_layer2.py   # Layer 2 EMVCo + CRC
+# Logika murni: Layer 2, Layer 3, QR, sintetik, JNI bridge
+# (--no-default-features melewatkan nokhwa/V4L2 sehingga cepat & hemat disk)
+cd src-tauri
+cargo test --no-default-features --features jni-bridge --lib
+
+# Frontend
+cd ..
+npx tsc --noEmit
+npm run build
+```
+
+Pemeriksaan CRC payload (dulu `check_crc.py`) sekarang jadi command
+`verify_payload_crc` di Rust:
+
+```bash
+cd src-tauri
+cargo test --no-default-features --features jni-bridge --lib -- tampered_payload
 ```
 
 ## 📦 Paket yang dipakai per platform
-| Package | Desktop | Android | iOS |
+
+| Kebutuhan | Desktop | Android | iOS |
 |---|---|---|---|
-| Kivy + KivyMD | ✅ | ✅ | ✅ |
-| OpenCV (`opencv`) | ✅ | ✅ (native recipe) | ✅ |
-| numpy | ✅ | ✅ | ✅ |
-| Camera4Kivy (kamera) | — | ✅ (CameraX) | — (mode sintetik) |
-| pyzbar/zbar (import) | — | ✅ | — |
-| plyer (file picker) | ✅ | ✅ | — |
+| UI (React + Vite) | ✅ | ✅ | ✅ |
+| Tauri + Rust core | ✅ | ✅ | ✅ |
+| Kamera | `nokhwa` (V4L2/AVFoundation/MSMF) | CameraX via JNI | ❌ belum ada bridge |
+| Decode QR | `rqrr` | `rqrr` | `rqrr` |
+| Layer 1 optik | frame sintetik | frame sintetik | frame sintetik |
+| Layer 2 EMVCo + CRC | ✅ | ✅ | ✅ |
+| Layer 3 geofence | ✅ (kota manual) | ✅ | ✅ |
 
 ## 🚀 Menjalankan (mode utama)
-- **Live scan:** arahkan kamera ke QRIS → risiko & merchant muncul; pindah ke
-  QR lain → hasil ter-update otomatis.
-- **Import dari galeri:** tombol "Import Gambar" → pilih foto QRIS dari galeri.
+
+- **Live scan:** arahkan kamera ke QRIS → risiko & merchant muncul.
+- **Input payload manual:** tempel string QRIS lalu tekan Analisis — berguna
+  untuk menguji tiap aturan risiko tanpa kamera (lihat chip contoh payload).

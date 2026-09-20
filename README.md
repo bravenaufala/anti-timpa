@@ -1,68 +1,125 @@
 # Anti Timpa QRIS Scanner
 
-Scanner keamanan QRIS tiga-lapis (Layer 1 optik + Layer 2 EMVCo + Layer 3
-Kota geofence) yang dibungkus menjadi aplikasi **lintas-platform** (desktop /
-Android / iOS) dengan **KivyMD**. Seluruh analisis berjalan **lokal di
-perangkat** — tanpa server, tanpa cloud.
+Scanner keamanan QRIS tiga-lapis yang berjalan **100% lokal di perangkat** —
+tanpa server, tanpa cloud, tanpa unggah gambar.
+
+| Lapisan | Yang diperiksa | Implementasi |
+|---|---|---|
+| **Layer 1** — optik | Tamper fisik: edge density pada quiet zone + variansi glare antar-frame | Rust (`src-tauri/src/camera/synthetic.rs`, `lib.rs`) |
+| **Layer 2** — EMVCo | Struktur TLV, CRC-16/CCITT-FALSE, format/mata uang/negara, konteks QR, MCC palsu | Rust (`src-tauri/src/layer2_emvco.rs`) |
+| **Layer 3** — geofence | Kota klien (GPS) vs kota merchant (Tag 60) | Rust (`src-tauri/src/layer3_geofence.rs`) |
+
+Aplikasi tersedia untuk **desktop** (Linux/macOS/Windows), **Android**, dan
+**iOS** dari satu basis kode yang sama.
+
+> **Catatan migrasi:** proyek ini sebelumnya adalah aplikasi Python/KivyMD.
+> Versi Python sudah dihapus. Lihat [Migrasi dari Python](#migrasi-dari-python)
+> untuk apa yang berubah dan apa yang belum diporting.
 
 ## Struktur
 
 ```
 anti-timpa/
-├── layer1_optical.py        # Analisis tamper fisik (edge density + glare) [tidak diubah]
-├── layer2_emvco.py          # Validasi payload EMVCo + CRC-16 [tidak diubah]
-├── layer3_geofence.py       # Geofence kota (GPS klien vs kota merchant Tag 60)
-├── test_layer1.py           # Test Layer 1 (dipertahankan)
-├── test_layer2.py           # Test Layer 2 (dipertahankan)
-├── live_scanner.py          # Skrip desktop konsol asli (dipertahankan)
-├── camerax_provider/        # Provider kamera CameraX utk Camera4Kivy (hook p4a)
-├── app/
-│   ├── main.py              # Aplikasi KivyMD (entry point desktop)
-│   ├── main_mobile.py       # Aplikasi KivyMD mobile: Layer 1 + 2 + 3 + kamera nyata
-│   ├── main_desktop.py      # Aplikasi KivyMD desktop: Layer 1 + 2 + 3
-│   ├── scanner_core.py      # Mesin analisis lintas-platform (L1 + L2 + L3)
-│   ├── layer1_optical.py    # Salinan layer1 (waib agar ter-paket ke APK)
-│   ├── layer2_emvco.py      # Salinan layer2 (waib agar ter-paket ke APK)
-│   ├── layer3_geofence.py   # Salinan layer3 (waib agar ter-paket ke APK)
-│   ├── requirements-desktop.txt
-│   └── requirements-mobile.txt
-├── buildozer.spec           # Konfigurasi build Android (APK)
-├── ios/README-ios.md        # Catatan build iOS (butuh macOS + Xcode)
-└── run_desktop.sh           # Peluncur desktop
+├── src/                      # React (UI)
+│   ├── main.tsx
+│   ├── App.tsx               # layar utama + form payload + kamera
+│   ├── api.ts                # satu-satunya jembatan ke Rust (invoke)
+│   ├── types.ts              # tipe bersama, cerminan struct Rust
+│   ├── samples.ts            # fixture demo
+│   ├── styles.css
+│   └── components/
+│       ├── RiskGauge.tsx     # gauge skor gabungan
+│       ├── CameraPanel.tsx   # kontrol kamera + status backend
+│       ├── CameraPreview.tsx # pratinjau langsung (JPEG lewat IPC)
+│       └── DetailPanel.tsx   # rincian per-layer + payload
+├── src-tauri/                # Rust (backend)
+│   ├── Cargo.toml
+│   ├── tauri.conf.json       # devUrl = http://localhost:1420
+│   ├── capabilities/default.json
+│   └── src/
+│       ├── main.rs           # wrapper tipis
+│       ├── lib.rs            # command Tauri + orkestrasi skor + blur
+│       ├── layer2_emvco.rs   # parser TLV + CRC + 4 aturan risiko
+│       ├── layer3_geofence.rs# pencocokan kota
+│       ├── qr.rs             # decode QR (rqrr), ganti cv2 + pyzbar
+│       └── camera/
+│           ├── mod.rs        # trait CameraBackend + tipe Frame
+│           ├── desktop.rs    # nokhwa (V4L2/AVFoundation/MSMF)
+│           ├── mobile/       # penerima frame dari plugin native
+│           ├── preview.rs    # downscale + JPEG untuk pratinjau
+│           ├── log.rs        # log tag ANTITIMPA (UI + logcat)
+│           └── synthetic.rs  # fallback deterministik, bisa diuji
+├── android/                  # separuh Kotlin dari jembatan kamera CameraX
+├── build-apk.sh              # build + sign + verifikasi simbol JNI
+├── keystore/                 # keystore rilis Android
+└── README.md
 ```
 
-## Menjalankan di Desktop
+## Menjalankan
 
 ```bash
-python -m venv .venv && . .venv/bin/activate
-pip install -r app/requirements-desktop.txt
-python app/main.py
+npm install
+
+# Hanya UI di browser (backend Rust tidak aktif; ada peringatan di layar)
+npm run dev
+
+# Aplikasi penuh: React + Rust core
+npm run tauri:dev
+
+# Build produksi
+npm run tauri:build
 ```
 
-Atau langsung: `./run_desktop.sh`.
+Dev server Vite dikunci ke `http://localhost:1420` dengan `strictPort: true`,
+dan `tauri.conf.json` menunjuk `devUrl` ke alamat yang sama. Kalau port itu
+terpakai, Vite gagal keras alih-alih diam-diam pindah port — supaya WebView
+tidak pernah menampilkan halaman kosong.
 
-Kamera default index `0`. Atur lewat variabel lingkungan: 
-`CAMERA_SOURCE=2 ./run_desktop.sh`
+## Validasi
 
-Jika kamera tidak tersedia, aplikasi otomatis beralih ke **mode simulasi**
-(generator frame sintetis) sehingga seluruh pipeline tetap jalan untuk demo.
+```bash
+cd src-tauri
 
-## Build & Distribusi
+# Logika murni (Layer 2, Layer 3, QR, sintetik, JNI bridge)
+cargo test --no-default-features --features jni-bridge --lib
 
-**Panduan build lengkap (desktop / Android APK / iOS IPA) ada di
-[`BUILD.md`](BUILD.md).** Ringkasnya:
+# Termasuk backend kamera desktop
+cargo test --features desktop-camera,jni-bridge --lib
+```
 
-- **Android APK** — sudah jadi: `bin/antitimpa-0.1.0-arm64-v8a-debug.apk`
-  (package `org.antitimpa.antitimpa`, minSdk 21 / targetSdk 34, izin
-  `CAMERA` + penyimpanan). Rebuild: `buildozer -v android debug`.
-- **iOS IPA** — butuh macOS + Xcode. Lihat `ios/README-ios.md`.
-- **Desktop** — `./run_desktop.sh` atau `python app/main.py`.
+Frontend:
 
-## Lokal 100%
+```bash
+npx tsc --noEmit
+npm run build
+```
 
-- Semua perhitungan (`layer1_optical` & `layer2_emvco`) memakai `numpy`/`cv2`
-  di perangkat.
-- Tidak ada izin jaringan yang diminta. Gambar kamu tidak pernah diunggah.
+## Build Android (APK)
+
+```bash
+./build-apk.sh              # build + sign
+./build-apk.sh --install    # build + sign + install ke perangkat
+```
+
+Skrip ini memverifikasi simbol JNI masih ada di `.so` rilis sebelum menandatangani
+APK — release build memakai LTO + `strip = true`, yang menghapus entry point JNI
+kecuali `build.rs` memaksanya tetap ada. Tanpa pemeriksaan ini, kegagalan hanya
+muncul di perangkat sebagai `UnsatisfiedLinkError` saat kamera pertama dipanggil.
+
+Detail lengkap (alur JNI, bug yang pernah ditemukan, catatan izin kamera) ada di
+[`android/README.md`](android/README.md).
+
+Prasyarat: Android SDK + NDK, keystore di `keystore/antitimpa.keystore`
+(lihat `build-apk.sh` untuk variabel yang bisa di-override).
+
+## Konfigurasi localhost / jaringan
+
+- `vite.config.ts` → `server.host` default `127.0.0.1`, port `1420`.
+- Untuk uji dari perangkat fisik, set `TAURI_DEV_HOST=<ip-lan>`; Vite akan
+  listen di IP itu dan HMR otomatis pindah ke port `1421`.
+- `tauri.conf.json` → CSP sudah ketat: `default-src 'self'`, hanya `img-src`
+  yang mengizinkan `blob:`/`data:` dan aset lokal. Tidak ada akses jaringan
+  keluar, konsisten dengan janji "100% lokal".
 
 ## Ringkasan Skor Risiko
 
@@ -70,66 +127,64 @@ Jika kamera tidak tersedia, aplikasi otomatis beralih ke **mode simulasi**
 - **CAUTION** (0.35–0.70)
 - **HIGH RISK** (> 0.70 atau CRC gagal — veto keras)
 
-## Layer 3 — Geofence Kota
+Skor gabungan adalah `max(l1, l2, l3)`, dengan **veto keras** menjadi `1.0` bila
+CRC gagal. Aturan band ini ada di `risk_band()` (`src-tauri/src/lib.rs`).
 
-Kota klien (dari GPS, di-reverse-geocode ke nama kota) dibandingkan dengan kota
-merchant dari QR (Tag 60). Cocok → `LOW RISK`; tidak cocok → `HIGH RISK`
-(anomali geofence). Jika lokasi klien atau kota merchant tidak tersedia, cek
-dilewati (`LOW RISK`). Skor `l3_score` ikut dalam skor gabungan
-(`max(l1, l2, l3)`), dengan veto keras CRC bila gagal.
+## Log detail scan
 
-- Mobile: GPS (`plyer.gps`) + reverse geocoding (Nominatim). Izin lokasi
-  diminta bersama izin kamera.
-- Desktop: tidak ada GPS — set kota klien manual lewat kotak input
-  "Kota Klien" lalu tekan "Gunakan Kota".
+Semua log memakai tag `ANTITIMPA`, sama seperti aplikasi lama, sehingga alat
+diagnostik yang sudah ada tetap berlaku:
 
-## Log detail scan (UI + adb logcat)
+```bash
+adb logcat -s ANTITIMPA
+```
 
-Setiap kali hasil scan diperbarui, app menulis **log detail** ke tiga tempat:
+## Migrasi dari Python
 
-1. **Layar** — panel `[Log Detail]` tepat di bawah judul hasil, berisi payload
-   QR, nilai blur, skor L1/L2/L3, CRC (encoded), dan warning.
-2. **File** `antitimpa.log` di app private storage.
-3. **Logcat Android** dengan tag `ANTITIMPA` — dibaca dari komputer via
-   ```bash
-   adb logcat -s ANTITIMPA
-   ```
-   (pakai `adb shell logcat -s ANTITIMPA` kalau ingin langsung di device.)
+Versi Python/KivyMD (`app/`, `layer*.py`, `main_*.py`, `buildozer.spec`,
+`camerax_provider/`, `p4a-fork/`, `bin/`, `.buildozer/`, `ios/`, dan venv) sudah
+dihapus. Yang setara di Rust:
 
-## Mobile: dual-layer (Layer 1 + Layer 2) + kamera nyata
+| Python lama | Padanan sekarang | Status |
+|---|---|---|
+| `layer2_emvco.py` | `src-tauri/src/layer2_emvco.rs` | Selaras; fixture `test_layer2.py` di-inline sebagai unit test Rust |
+| `layer3_geofence.py` | `src-tauri/src/layer3_geofence.rs` | Selaras |
+| `scanner_core.py` (detect QR) | `src-tauri/src/qr.rs` (`rqrr`) | Menggantikan `cv2` + `pyzbar` |
+| `scanner_core.py` (blur gate) | `lib.rs` (Laplacian variance) | Selaras, kernel 3x3 sama |
+| `scanner_core.py` (skor gabungan) | `lib.rs` (`risk_band`) | Selaras |
+| `main_mobile.py` / `main_desktop.py` (UI) | `src/App.tsx` + komponen React | Diganti |
+| `main_mobile.py` (generator sintetik) | `camera/synthetic.rs` | Selaras; geometri mengikuti `test_layer1.py` |
+| `main_desktop.py` (`cv2.VideoCapture`) | `camera/desktop.rs` (`nokhwa`) | Diganti |
+| `test_layer1.py` / `test_layer2.py` | unit test Rust di `src-tauri/src` | Diganti |
+| `check_crc.py` | `verify_payload_crc` (command Tauri) | Diganti |
+| `camerax_provider/` (Camera4Kivy) | `android/CameraBridge.kt` + `camera/mobile/` | Diganti; **belum diuji di perangkat** |
+| `live_scanner.py` (skrip konsol) | dibuang — digantikan UI | — |
 
-`app/main_mobile.py` menjalankan **Layer 1 optik DAN Layer 2 EMVCo** langsung di
-perangkat. Kini memakai **Camera4Kivy** (`camera4kivy`) sebagai bridge kamera
-nyata: frame kamera Android (CameraX) dianalisis oleh `QrisScannerCore` (Layer 1
-edge density + glare variance, dan Layer 2 payload EMVCo + CRC). Semua analisis
-berjalan **lokal** — tanpa server, tanpa jaringan.
+Verifikasi silang yang sudah dilakukan (payload identik, Python vs Rust):
 
-`buildozer.spec` menyiapkan:
-- `requirements` = ...,`opencv-python`,`numpy`,`camera4kivy`,`gestures4kivy`
-- `p4a.hook = camerax_provider/gradle_options.py` → menambah dependensi Gradle
-  CameraX + izin CAMERA + source Java provider.
+| Pemeriksaan | Python | Rust |
+|---|---|---|
+| CRC payload valid | `1B52` | `1B52` |
+| `l2_score` (QRIS bersih) | `0.0` | `0.0` |
+| `initiation_mode` | `11` | `11` |
+| `mcc` | `5411` | `5411` |
+| Geofence Bandung vs JAKARTA | `1.0` / HIGH RISK | `1.0` / HIGH RISK |
 
-Bila kamera tidak tersedia, aplikasi otomatis beralih ke **generator sintetik**
-(yang menyuntikkan anomali stiker + glare) sehingga pipeline Layer 1 tetap jalan
-di perangkat untuk demo. Bila OpenCV tidak ter-paket (APK ringan), turun ke
-mode **Layer-2-only** (tempel payload + Analisis).
+> Catatan pengembangan yang lebih mendetail — prototipe kamera, temuan bug JNI,
+> dan catatan lingkungan saat kedua versi masih berdampingan — ada di
+> [`DEVNOTES.md`](DEVNOTES.md).
 
-### Kamera = one-shot (macam Import Gambar)
+## Yang belum selesai
 
-Di kamera nyata, thread kamera **hanya preview** (sangat ringan, tanpa decode
-per frame). Saat pengguna menekan tombol **"Ambil Foto QR (One-Shot)"**, app
-mengambil **SATU frame** terakhir lalu menganalisisnya memakai decoder mendalam
-yang sama dengan mode **Import Gambar** (`pyzbar` + multi-skala/CLAHE) di
-thread terpisah — lebih andal dan tidak bikin hang. Hasil + log rincian
-(`adb logcat -s ANTITIMPA`) langsung ditampilkan.
-
-## Roadmap
-
-- ~~Bridge kamera nyata Android (`camera4kivy`)~~ — selesai (APK debug sudah
-  memakai CameraX).
-- ~~Layer 3 — Geofence kota (GPS mobile / kota manual desktop)~~ — selesai
-  (terhubung ke versi mobile & desktop).
-- Kamera iOS ke OpenCV via bridge native (Camera4Kivy AVFoundation).
-- Rilis `release` APK (bukan `debug`) + keystore untuk Play Store.
-- Pilih file QRIS dari galeri pada Android/iOS (plyer `filechooser`) sudah
-  disiapkan.
+1. **Layer 1 optik penuh** — jalur *import gambar* dan analisis edge-density
+   per-frame belum diporting; saat ini Layer 1 memakai frame sintetik, dan
+   `analyze_payload` memakai placeholder `l1_score = 0.0` (ditandai
+   `"risk_level": "NOT RUN"`). Ambang `0.15` dan `0.003` dari Python sangat
+   sensitif, jadi portnya butuh golden test.
+2. **Jembatan kamera mobile di perangkat.** Sisi Rust (`camera/mobile/android.rs`)
+   sudah diuji di host lewat fitur `jni-bridge`, tapi `CameraBridge.kt` belum
+   pernah dikompilasi/dijalankan di perangkat nyata. Lihat
+   [`android/README.md`](android/README.md).
+3. **Kamera iOS.** Belum ada bridge AVFoundation.
+4. **`src-tauri/gen/`** — dibuat ulang oleh `npx tauri android init`.
+   `build-apk.sh` dan langkah pemasangan `CameraBridge.kt` bergantung padanya.

@@ -1,25 +1,15 @@
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
+# Dependencies
+node_modules/
+src-tauri/target/
+dist/
 
-# Virtual environments
-.venv/
-.venv-android/
-venv/
+# Generated Tauri schemas
+src-tauri/gen/
 
-# Buildozer / android / ios output
-bin/
-build/
-.buildozer/
-.android/
-.kivy/
-__pycache__/
+# Local env
+.env
+.env.local
 
-# Editors / OS
-.vscode/
-.idea/
+# Editor / OS
 .DS_Store
-
-# Build logs
-build_apk.log
+*.log
