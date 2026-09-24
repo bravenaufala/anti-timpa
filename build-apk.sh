@@ -71,8 +71,14 @@ npm run build >/dev/null
 info "Membangun APK release (arm64-v8a)..."
 # TAURI_* variables are read by the CLI; exported so the Gradle invocation sees
 # the same NDK the preflight resolved.
+#
+# `--features geolocation` is required here: the Tauri geolocation plugin is an
+# optional dependency, and mobile builds must opt in. Without it the plugin is
+# not registered and Layer 3 reports "location unavailable" on every scan even
+# though the OS location service and the permission prompt are both available.
 export ANDROID_HOME ANDROID_NDK_HOME
-npx tauri android build --apk --target aarch64
+export TAURI_ANDROID_FEATURES="geolocation"
+npx tauri android build --apk --target aarch64 --features geolocation
 
 [ -f "$UNSIGNED_APK" ] || fail "APK tidak dihasilkan di $UNSIGNED_APK"
 
@@ -145,6 +151,11 @@ if [ "${1:-}" = "--install" ]; then
   # Grant the camera permission up front so the log is not dominated by the
   # permission dialog during verification. A real user would see the prompt.
   "$ADB" shell pm grant org.antitimpa.antitimpa android.permission.CAMERA 2>/dev/null || true
+
+  # Location is deliberately NOT pre-granted. The whole point of Layer 3 asking
+  # at scan time is that the user makes an informed choice, and auto-granting
+  # during a test install would hide whether the permission prompt actually works.
+  info "Izin lokasi sengaja tidak di-grant otomatis — uji prompt manualnya."
 
   info "Terpasang. Untuk melihat log kamera:"
   echo "    $ADB logcat -s ANTITIMPA RustStdoutStderr | grep -i camera"

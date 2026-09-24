@@ -20,6 +20,13 @@ pub struct SyntheticSpec {
     /// Radius of a bright specular highlight. Varies frame-to-frame to
     /// exercise the Layer 1 temporal glare variance.
     pub glare_radius: u32,
+    /// Payload for a **real, decodable** QR symbol rendered inside `qr_bbox`.
+    ///
+    /// `None` keeps the old geometric stand-in (finder-pattern squares), which
+    /// is enough to exercise the texture and margin metrics but is not a valid
+    /// QR. Set this when a test needs the pipeline to actually reach the payload
+    /// layers, which is what makes an end-to-end assertion possible.
+    pub qr_payload: Option<String>,
 }
 
 impl Default for SyntheticSpec {
@@ -32,6 +39,7 @@ impl Default for SyntheticSpec {
             qr_bbox: (200, 140, 240, 240),
             sticker_anomaly: false,
             glare_radius: 0,
+            qr_payload: None,
         }
     }
 }
@@ -160,49 +168,48 @@ impl CameraBackend for SyntheticBackend {
             [210, 210, 210],
         );
 
-        // 2. QR body outline plus three finder patterns.
-        Self::fill_rect(
-            &mut rgb,
-            w,
-            h,
-            qx as i64,
-            qy as i64,
-            qw as i64,
-            2,
-            [0, 0, 0],
-        );
-        Self::fill_rect(
-            &mut rgb,
-            w,
-            h,
-            qx as i64,
-            qy as i64 + qh as i64 - 2,
-            qw as i64,
-            2,
-            [0, 0, 0],
-        );
-        Self::fill_rect(
-            &mut rgb,
-            w,
-            h,
-            qx as i64,
-            qy as i64,
-            2,
-            qh as i64,
-            [0, 0, 0],
-        );
-        Self::fill_rect(
-            &mut rgb,
-            w,
-            h,
-            qx as i64 + qw as i64 - 2,
-            qy as i64,
-            2,
-            qh as i64,
-            [0, 0, 0],
-        );
-        for (fx, fy) in [(10, 10), (qw as i64 - 60, 10), (10, qh as i64 - 60)] {
-            Self::fill_rect(&mut rgb, w, h, qx as i64 + fx, qy as i64 + fy, 50, 50, [0, 0, 0]);
+        // 2. QR body. Either a real, decodable symbol (when a payload was
+        //    given) or the geometric stand-in the earlier fixtures used.
+        match self.spec.qr_payload.as_deref() {
+            Some(payload) => {
+                Self::draw_real_qr(&mut rgb, w, h, qx, qy, qw, qh, payload);
+            }
+            None => {
+                Self::fill_rect(&mut rgb, w, h, qx as i64, qy as i64, qw as i64, 2, QR_DARK);
+                Self::fill_rect(
+                    &mut rgb,
+                    w,
+                    h,
+                    qx as i64,
+                    qy as i64 + qh as i64 - 2,
+                    qw as i64,
+                    2,
+                    QR_DARK,
+                );
+                Self::fill_rect(&mut rgb, w, h, qx as i64, qy as i64, 2, qh as i64, QR_DARK);
+                Self::fill_rect(
+                    &mut rgb,
+                    w,
+                    h,
+                    qx as i64 + qw as i64 - 2,
+                    qy as i64,
+                    2,
+                    qh as i64,
+                    QR_DARK,
+                );
+                for (fx, fy) in [(10, 10), (qw as i64 - 60, 10), (10, qh as i64 - 60)] {
+                    Self::fill_rect(
+                        &mut rgb,
+                        w,
+                        h,
+                        qx as i64 + fx,
+                        qy as i64 + fy,
+                        50,
+                        50,
+                        QR_DARK,
+                    );
+                }
+            }
         }
 
         // 3. Sticker anomaly: high-contrast parallel edges in the 10% margin.
@@ -262,7 +269,116 @@ impl SyntheticBackend {
         const CYCLE: [u32; 5] = [0, 40, 10, 50, 5];
         CYCLE[self.tick % CYCLE.len()]
     }
+
+    /// Renders a real, decodable QR symbol into the given box.
+    ///
+    /// Exists because the geometric stand-in (border plus finder-pattern
+    /// squares) is not a valid QR and therefore never decodes. That made every
+    /// test stop *before* the decode step, so nothing exercised the path from a
+    /// frame all the way through to a layer result — the exact seam where a
+    /// regression would be invisible.
+    ///
+    /// Module size is derived from the symbol dimensions so the caller keeps
+    /// control of the bounding box, and the symbol is centred inside it.
+    ///
+    /// Only compiled when the `qr-encode` feature is on, which is what keeps the
+    /// encoder out of the shipping binary.
+    #[cfg(feature = "qr-encode")]
+    fn draw_real_qr(
+        rgb: &mut [u8],
+        width: u32,
+        height: u32,
+        qx: u32,
+        qy: u32,
+        qw: u32,
+        qh: u32,
+        payload: &str,
+    ) {
+        use qrcode::QrCode;
+
+        let Ok(code) = QrCode::new(payload.as_bytes()) else {
+            // Unencodable payload: fall back to a plain white box rather than
+            // panicking, so a bad fixture shows up as "no QR" and not a crash.
+            Self::fill_rect(
+                rgb,
+                width,
+                height,
+                qx as i64,
+                qy as i64,
+                qw as i64,
+                qh as i64,
+                QR_LIGHT,
+            );
+            return;
+        };
+
+        let modules = code.to_colors();
+        let count = code.width() as i64;
+        if count == 0 {
+            return;
+        }
+
+        // Integer module size keeps every module the same pixel footprint, which
+        // matters because a non-integer scale produces uneven module edges that
+        // read as spurious texture.
+        let module_px = (qw.min(qh) as i64 / count).max(1);
+        let total = module_px * count;
+
+        // Centre the symbol in the requested box.
+        let origin_x = qx as i64 + (qw as i64 - total) / 2;
+        let origin_y = qy as i64 + (qh as i64 - total) / 2;
+
+        Self::fill_rect(rgb, width, height, origin_x, origin_y, total, total, QR_LIGHT);
+
+        for my in 0..count {
+            for mx in 0..count {
+                let idx = (my * count + mx) as usize;
+                if modules[idx] != qrcode::types::Color::Dark {
+                    continue;
+                }
+                Self::fill_rect(
+                    rgb,
+                    width,
+                    height,
+                    origin_x + mx * module_px,
+                    origin_y + my * module_px,
+                    module_px,
+                    module_px,
+                    QR_DARK,
+                );
+            }
+        }
+    }
+
+    /// Fallback when the encoder is not linked: draws the geometric stand-in
+    /// regardless of the requested payload, and says so in the logs.
+    #[cfg(not(feature = "qr-encode"))]
+    fn draw_real_qr(
+        rgb: &mut [u8],
+        width: u32,
+        height: u32,
+        qx: u32,
+        qy: u32,
+        qw: u32,
+        qh: u32,
+        _payload: &str,
+    ) {
+        crate::camera::log::cam_warn(
+            "qr_payload diminta tetapi fitur `qr-encode` tidak aktif; \
+             yang digambar adalah stand-in geometris, bukan QR asli",
+        );
+        Self::fill_rect(rgb, width, height, qx as i64, qy as i64, qw as i64, qh as i64, QR_LIGHT);
+        let _ = (width, height, qw, qh, qx, qy);
+    }
 }
+
+/// Dark module and light module colours for a rendered symbol.
+///
+/// Pure black/white rather than the off-white paper tone: the printed symbol
+/// needs maximum contrast for the decoder, while the surrounding *paper* is
+/// what carries the off-white tone.
+const QR_DARK: [u8; 3] = [0, 0, 0];
+const QR_LIGHT: [u8; 3] = [255, 255, 255];
 
 #[cfg(test)]
 mod tests {

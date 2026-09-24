@@ -7,6 +7,7 @@
 export type RiskLevel =
   | "NO QR"
   | "NOT RUN"
+  | "NOT COMPARABLE"
   | "MENUNGGU SCAN"
   | "LOW RISK"
   | "CAUTION"
@@ -16,7 +17,18 @@ export interface Layer1Result {
   l1_score: number;
   spatial_edge_density: number;
   temporal_glare_var: number;
+  /**
+   * Peak local texture variance. Reported for calibration but deliberately given
+   * no weight in the score: it saturates on any readable QR, so it cannot
+   * discriminate a tampered symbol from a clean one.
+   */
+  texture_discontinuity: number;
+  /** Share of the detection ring covered by specular glare. */
+  glare_fraction: number;
   risk_level: RiskLevel;
+  /** True when the QR sits too close to the frame edge to measure its margin. */
+  quiet_zone_truncated: boolean;
+  warnings: string[];
 }
 
 export interface Layer2Result {
@@ -30,12 +42,47 @@ export interface Layer2Result {
   warnings: string[];
 }
 
+/** How the location comparison actually resolved. */
+export type MismatchKind =
+  | "MATCH"
+  | "SAME_METRO"
+  | "NOT_COMPARABLE"
+  | "NOT_EVALUATED"
+  | "DIFFERENT_CITY_NEARBY"
+  | "DIFFERENT_CITY_DISTANT"
+  | "DIFFERENT_CITY_UNBOUNDED";
+
 export interface Layer3Result {
   l3_score: number;
   risk_level: RiskLevel;
   warnings: string[];
   client_city: string | null;
   merchant_city: string | null;
+  mismatch_kind: MismatchKind;
+  distance_km: number | null;
+  location_available: boolean;
+  /** False when the comparison was skipped, which is not the same as "passed". */
+  evaluated: boolean;
+}
+
+/** Which layers actually executed for a scan. */
+export interface ScanCoverage {
+  optical_ran: boolean;
+  payload_ran: boolean;
+  geofence_ran: boolean;
+  /** True only when every layer that could apply actually ran. */
+  complete: boolean;
+  summary: string;
+}
+
+/** A single named risk rule that fired. */
+export interface Finding {
+  /** Stable rule identifier, e.g. `L2_CRC_MISMATCH`. */
+  code: string;
+  layer: string;
+  severity: "HIGH" | "MEDIUM" | "INFO" | string;
+  title: string;
+  detail: string;
 }
 
 export interface ScanSnapshot {
@@ -50,9 +97,29 @@ export interface ScanSnapshot {
   raw_qris_str: string;
   /** Set when no QR was read; explains what the user should do next. */
   no_qr_reason: string | null;
+  coverage: ScanCoverage;
+  findings: Finding[];
+  chain_hash: number | null;
 }
 
 export type OpticalType = "physical_camera_scan" | "imported_image";
+
+/** One recorded scan, as stored in the Rust-side hash chain. */
+export interface HistoryEntry {
+  seq: number;
+  timestamp_ms: number | null;
+  source: string;
+  combined_score: number;
+  combined_risk_level: string;
+  payload_preview: string;
+  l1_score: number;
+  l2_score: number;
+  l3_score: number;
+  crc_valid: boolean;
+  top_finding: string | null;
+  prev_hash: number;
+  entry_hash: number;
+}
 
 /** Which camera backend Rust actually opened, plus runtime health. */
 export interface CameraDiagnostics {
@@ -83,4 +150,11 @@ export interface PreviewFrame {
   height: number;
   /** Encoded payload size in bytes. */
   byte_len: number;
+}
+
+/** A coarse device position, supplied to Layer 3 for the distance estimate. */
+export interface ClientLocation {
+  city: string | null;
+  lat: number | null;
+  lon: number | null;
 }

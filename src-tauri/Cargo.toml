@@ -25,6 +25,21 @@ desktop-camera = ["dep:nokhwa"]
 # without an Android toolchain. Android builds enable it via cfg automatically.
 jni-bridge = []
 
+# Links the QR *encoder*, used by the synthetic backend to render real symbols.
+#
+# Off by default and never enabled in the app's own `tauri.conf.json` build: the
+# shipping product only reads QR codes, so the encoder is dead weight in a
+# release binary. Tests enable it, and so does the `probe_import` diagnostic.
+# An optional dependency rather than a `[dev-dependencies]` entry because a
+# dev-dependency is not visible from the library's own modules when an example
+# links against it.
+qr-encode = ["dep:qrcode"]
+
+# Enables the OS location plugin. Mobile builds turn this on automatically via
+# `cfg(mobile)`; on desktop it stays off because there is no OS location service
+# to ask — desktop gets location from a user-entered city or the offline table.
+geolocation = ["dep:tauri-plugin-geolocation"]
+
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-shell = "2"
@@ -35,7 +50,7 @@ serde_json = "1"
 rqrr = "0.10"
 
 # Image buffer container used at the Decode boundary, and for encoding the
-# camera preview to JPEG.
+# camera preview to JPEG, and for decoding imported images.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 # Encodes preview JPEGs for transport over IPC as data URLs.
@@ -52,6 +67,12 @@ nokhwa = { version = "0.10", optional = true, features = [
     "input-native",
     "decoding",
 ] }
+
+# QR encoding, for the synthetic test backend only. See the `qr-encode` feature.
+qrcode = { version = "0.14", optional = true }
+
+# OS location, for Layer 3's distance estimate. See the `geolocation` feature.
+tauri-plugin-geolocation = { version = "2", optional = true }
 
 [profile.release]
 codegen-units = 1
