@@ -65,6 +65,30 @@ kompilasi Rust.
 > memeriksa logika, pakai perintah validasi di bagian 3 yang jauh lebih ringan
 > (`--no-default-features` melewatkan nokhwa/V4L2).
 
+### Ikon aplikasi
+
+Semua ikon platform (Windows `.ico`, macOS `.icns`, iOS, Android adaptive, dan
+PNG desktop) dibuat dari satu sumber di `src-tauri/` lewat manifest
+`src-tauri/icon-manifest.json`:
+
+- `src-tauri/app-icon.png` — logo utuh (1024×1024, latar `#152542`) untuk ikon
+desktop/iOS dan launcher Android legacy.
+- `src-tauri/app-icon-foreground.png` — logo transparan untuk foreground ikon
+adaptive Android.
+- `bg_color` `#152542` — warna latar ikon adaptive Android.
+
+Regenerasi seluruh format setelah mengganti logo:
+
+```bash
+cd anti-timpa
+npx tauri icon src-tauri/icon-manifest.json
+```
+
+Ikon desktop/web di `public/` (`favicon.png`, `apple-touch-icon.png`,
+`icon-32/180/192/512.png`) diturunkan dari `src-tauri/app-icon.png` dan direferensikan
+di `index.html`. Ikon Android masuk ke `src-tauri/gen/android/` (tidak masuk git),
+jadi jalankan `npx tauri android init` sebelum build APK.
+
 ---
 
 ## 2. Build Android APK

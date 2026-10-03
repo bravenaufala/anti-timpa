@@ -106,13 +106,14 @@ export default function App() {
     return window.localStorage.getItem(TECHNICAL_KEY) === "1";
   });
   /**
-   * Preview is opt-in and off by default.
+   * Preview is on by default so the camera is already framing a QR the moment
+   * the app opens; the toggle still lets the user switch it off.
    *
-   * Each preview frame costs a capture plus a JPEG encode in Rust, so leaving
-   * it running permanently would keep the camera device busy and burn battery
-   * for no benefit when the user is not actively framing a QR.
+   * Each preview frame costs a capture plus a JPEG encode in Rust, so an idle
+   * preview keeps the camera device busy and burns battery. Defaulting it on is
+   * a deliberate trade for a camera-first app where framing is the first step.
    */
-  const [previewOn, setPreviewOn] = useState(false);
+  const [previewOn, setPreviewOn] = useState(true);
   /**
    * Tracks whether this is the real unmount rather than React StrictMode's
    * intentional throwaway unmount.
@@ -296,14 +297,6 @@ export default function App() {
           <ScanResultCard snapshot={snapshot} busy={busy} />
         )}
 
-        <CameraPanel
-          info={camera}
-          busy={busy}
-          onCapture={runCapture}
-          disabled={!isTauri()}
-          technical={technical}
-        />
-
         <section className="panel">
           <label className="toggle">
             <input
@@ -326,6 +319,18 @@ export default function App() {
            */}
           {previewOn && <CameraPreview active={previewOn && !busy} technical={technical} />}
         </section>
+
+        {/*
+         * The scan button lives below the preview so the framing the user sees
+         * sits directly above the control that captures it.
+         */}
+        <CameraPanel
+          info={camera}
+          busy={busy}
+          onCapture={runCapture}
+          disabled={!isTauri()}
+          technical={technical}
+        />
 
         {technical && (
           <>

@@ -28,7 +28,17 @@ body {
 }
 
 .topbar {
-  padding: 16px 20px;
+  /*
+   * Keep the header clear of the phone's status/notification bar.
+   *
+   * The Android host draws edge-to-edge (`enableEdgeToEdge` in MainActivity),
+   * so the status bar overlaps the WebView. `env(safe-area-inset-top)` is the
+   * gap the OS reserves for it, and resolves to 0 on desktop (and 0 alongside a
+   * left/right notch in portrait), so the base padding stays unchanged there.
+   */
+  padding: calc(16px + env(safe-area-inset-top, 0px))
+    calc(20px + env(safe-area-inset-right, 0px)) 16px
+    calc(20px + env(safe-area-inset-left, 0px));
   background: var(--accent);
   display: flex;
   flex-direction: column;
@@ -87,6 +97,10 @@ body {
   flex-direction: column;
   gap: 12px;
   padding: 16px;
+  /* Same safe-area handling as the header, plus the home indicator on iOS. */
+  padding-left: calc(16px + env(safe-area-inset-left, 0px));
+  padding-right: calc(16px + env(safe-area-inset-right, 0px));
+  padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
   max-width: 640px;
   width: 100%;
   margin: 0 auto;
