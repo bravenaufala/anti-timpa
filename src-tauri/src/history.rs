@@ -1,21 +1,26 @@
-//! In-memory, session-scoped scan history + a tamper-evident hash chain.
+//! Scan history + a tamper-evident hash chain, persisted locally.
 //!
 //! Two jobs, one structure:
 //!
-//! 1. **Evidence.** A finding is only useful if you can refer back to it —
-//!    "which scan, at what time, what exactly did it see?". The rolling buffer
-//!    keeps the last `MAX_ENTRIES` scans so the UI can show a timeline.
+//! 1. Evidence. A finding is only useful if it can be referred back to: which
+//!    scan, at what time, what it saw. The rolling buffer keeps the last
+//!    `MAX_ENTRIES` scans so the UI can show a timeline.
 //!
-//! 2. **Tamper-evidence.** Each entry's hash covers the previous entry's hash,
+//! 2. Tamper-evidence. Each entry's hash covers the previous entry's hash,
 //!    forming an append-only chain. Deleting or editing an entry breaks every
-//!    hash after it, which `verify_chain` detects.
+//!    hash after it, which `verify` detects.
 //!
 //! What this is *not*: a secure audit log. There is no key and no signature, so
-//! a determined attacker who can rewrite the whole buffer can also recompute the
+//! a determined attacker who can rewrite the whole file can also recompute the
 //! whole chain. It is a cheap integrity seam that makes accidental corruption
-//! and naive editing visible, and it is deliberately in-memory only — persisting
-//! a scan log is a privacy decision that must be made by the user, not by
-//! default (see the report's security chapter).
+//! and naive editing visible.
+//!
+//! Persistence
+//! -----------
+//! Entries are written to a JSON file in the app's data directory ("db lokal"
+//! on the device). Writes happen after every append and every clear, and the
+//! file is read back on startup. No network is involved at any point, so the
+//! app's on-device guarantee still holds.
 
 use serde::{Deserialize, Serialize};
 
@@ -36,10 +41,10 @@ const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
 /// FNV-1a, used as a fast non-cryptographic integrity hash.
 ///
-/// Chosen deliberately over SHA-256: this chain guards against accidental
-/// corruption and casual editing, not a motivated adversary, and FNV-1a keeps
-/// the dependency footprint at zero. The report states this limitation
-/// explicitly — do not mistake it for a signature.
+/// Chosen over SHA-256 because this chain guards against accidental corruption
+/// and casual editing, not a motivated adversary, and FNV-1a keeps the
+/// dependency footprint at zero. The report states this limitation explicitly;
+/// it is not a signature.
 fn fnv1a(bytes: &[u8]) -> u64 {
     let mut hash = FNV_OFFSET;
     for b in bytes {
@@ -60,7 +65,14 @@ pub struct HistoryEntry {
     pub source: String,
     pub combined_score: f64,
     pub combined_risk_level: String,
-    /// Truncated payload preview — never the full payload, so the history view
+    /// Merchant name from Tag 59, so the history is readable without decoding a
+    /// payload preview. Empty when the payload had none.
+    #[serde(default)]
+    pub merchant_name: String,
+    /// Merchant city from Tag 60.
+    #[serde(default)]
+    pub merchant_city: String,
+    /// Truncated payload preview, never the full payload, so the history view
     /// cannot become an accidental log of everything the user scanned.
     pub payload_preview: String,
     pub l1_score: f64,
@@ -82,6 +94,8 @@ pub struct HistoryInput {
     pub source: String,
     pub combined_score: f64,
     pub combined_risk_level: String,
+    pub merchant_name: String,
+    pub merchant_city: String,
     pub payload: String,
     pub l1_score: f64,
     pub l2_score: f64,
@@ -114,6 +128,8 @@ fn canonical_bytes(entry: &HistoryEntry) -> Vec<u8> {
     s.push_str(&format!("src={};", entry.source));
     s.push_str(&format!("score={:.6};", entry.combined_score));
     s.push_str(&format!("band={};", entry.combined_risk_level));
+    s.push_str(&format!("merch={};", entry.merchant_name));
+    s.push_str(&format!("mcity={};", entry.merchant_city));
     s.push_str(&format!("l1={:.6};l2={:.6};l3={:.6};", entry.l1_score, entry.l2_score, entry.l3_score));
     s.push_str(&format!("crc={};", entry.crc_valid as u8));
     s.push_str(&format!("find={};", entry.top_finding.as_deref().unwrap_or("")));
@@ -152,6 +168,8 @@ impl HistoryChain {
             source: input.source,
             combined_score: input.combined_score,
             combined_risk_level: input.combined_risk_level,
+            merchant_name: input.merchant_name,
+            merchant_city: input.merchant_city,
             payload_preview: preview(&input.payload),
             l1_score: input.l1_score,
             l2_score: input.l2_score,
@@ -189,6 +207,31 @@ impl HistoryChain {
         self.entries.clear();
         self.next_seq = 1;
         self.last_hash = 0;
+    }
+
+    /// Serializes every entry to JSON for local persistence.
+    pub fn to_json(&self) -> String {
+        serde_json::to_string(&self.entries).unwrap_or_else(|_| "[]".to_string())
+    }
+
+    /// Rebuilds a chain from a previously persisted JSON array.
+    ///
+    /// `next_seq` and `last_hash` are derived from the entries themselves rather
+    /// than trusted from the file, so an edited file cannot desynchronise the
+    /// append point. Stored hashes are kept as-is: `verify` is what detects
+    /// tampering, and silently recomputing them here would erase the evidence.
+    ///
+    /// A parse failure yields an empty chain rather than an error, since a
+    /// corrupt local file must not stop the app from starting.
+    pub fn from_json(raw: &str) -> Self {
+        let entries: Vec<HistoryEntry> = serde_json::from_str(raw).unwrap_or_default();
+        let last_hash = entries.last().map(|e| e.entry_hash).unwrap_or(0);
+        let next_seq = entries.last().map(|e| e.seq + 1).unwrap_or(1);
+        Self {
+            entries,
+            next_seq,
+            last_hash,
+        }
     }
 
     /// Walks the chain and reports whether it is intact.
@@ -240,6 +283,8 @@ mod tests {
             } else {
                 "LOW RISK".into()
             },
+            merchant_name: "WARUNG MAKMUR".into(),
+            merchant_city: "JAKARTA".into(),
             payload: payload.into(),
             l1_score: score,
             l2_score: 0.0,
@@ -354,5 +399,70 @@ mod tests {
         let e = chain.push(input("0002010102", 0.0));
         assert_eq!(e.seq, 1, "sequence restarts after clear");
         assert_eq!(e.prev_hash, 0);
+    }
+
+    #[test]
+    fn merchant_fields_are_stored_and_hashed() {
+        let mut chain = HistoryChain::new();
+        let e = chain.push(input("0002010102", 0.0));
+        assert_eq!(e.merchant_name, "WARUNG MAKMUR");
+        assert_eq!(e.merchant_city, "JAKARTA");
+
+        // Two entries identical except for the merchant name must hash
+        // differently, otherwise the name could be edited without detection.
+        let a = chain.push(HistoryInput {
+            merchant_name: "TOKO A".into(),
+            ..input("0002010102", 0.0)
+        });
+        let b = chain.push(HistoryInput {
+            merchant_name: "TOKO B".into(),
+            ..input("0002010102", 0.0)
+        });
+        assert_ne!(a.entry_hash, b.entry_hash);
+    }
+
+    #[test]
+    fn persisted_chain_round_trips_and_still_verifies() {
+        let mut chain = HistoryChain::new();
+        for i in 0..4 {
+            chain.push(input("0002010102", i as f64 / 10.0));
+        }
+
+        let restored = HistoryChain::from_json(&chain.to_json());
+        assert_eq!(restored.len(), 4);
+        assert!(restored.verify().0, "a restored chain must verify");
+
+        // Appending after a reload must continue the chain, not restart it.
+        let mut restored = restored;
+        let next = restored.push(input("0002010102", 0.0));
+        assert_eq!(next.seq, 5, "sequence must continue after reload");
+        assert_eq!(
+            next.prev_hash, chain.entries().last().unwrap().entry_hash,
+            "the reloaded chain must link to the last stored entry"
+        );
+        assert!(restored.verify().0);
+    }
+
+    #[test]
+    fn corrupt_persistence_yields_an_empty_chain() {
+        // A truncated or hand-edited file must not stop the app from starting.
+        let chain = HistoryChain::from_json("{ this is not json");
+        assert!(chain.is_empty());
+        assert_eq!(chain.verify().0, true);
+    }
+
+    #[test]
+    fn tampering_with_a_persisted_entry_is_detected_after_reload() {
+        let mut chain = HistoryChain::new();
+        chain.push(input("0002010102", 0.0));
+        chain.push(input("0002010102", 0.9));
+
+        // Simulate someone editing the stored file to soften a verdict.
+        let mut entries: Vec<HistoryEntry> = serde_json::from_str(&chain.to_json()).unwrap();
+        entries[1].combined_risk_level = "LOW RISK".into();
+        let edited = serde_json::to_string(&entries).unwrap();
+
+        let restored = HistoryChain::from_json(&edited);
+        assert!(!restored.verify().0, "an edited file must fail verification");
     }
 }

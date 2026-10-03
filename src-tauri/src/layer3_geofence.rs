@@ -1,10 +1,10 @@
-//! Layer 3 — geographic plausibility.
+//! Layer 3: geographic plausibility.
 //!
-//! # What this layer can and cannot establish
+//! # Scope
 //!
-//! A city mismatch between the device's location and EMVCo Tag 60 is **not**
-//! evidence of tampering. It is evidence of *implausibility*, and the two are
-//! different claims that need different evidence standards:
+//! A city mismatch between the device's location and EMVCo Tag 60 is not
+//! evidence of tampering. It is evidence of *implausibility*, and the two need
+//! different evidence standards:
 //!
 //! * An attacker who pastes a sticker copies the original Tag 60 verbatim. The
 //!   payload matches its CRC, and the merchant city is genuinely that merchant's
@@ -15,34 +15,34 @@
 //! So a naive `client_city != merchant_city => HIGH RISK` rule fires hardest on
 //! exactly the people behaving normally. In the original implementation that is
 //! literally the behaviour: any mismatch scored 1.0, which made the layer the
-//! single largest source of false positives in the whole pipeline — and, because
+//! single largest source of false positives in the whole pipeline, and because
 //! the combined score is `max(l1, l2, l3)`, a mismatch alone forced the app's
 //! headline verdict to HIGH RISK.
 //!
 //! This module replaces the flat rule with the reasoning that decision actually
 //! needs: a mismatch is a *weak* signal whose strength depends on things the
-//! flat rule discarded — how far away the client is, whether the merchant's city
-//! sits on a national border, and what kind of QR this is.
+//! flat rule discarded, such as how far away the client is, whether the
+//! merchant's city sits on a national border, and what kind of QR this is.
 //!
 //! # Design
 //!
-//! 1. **Comparability first.** Matching never fails just because strings differ.
-//!    If the merchant city cannot be interpreted as a place — a QR encoded as
-//!    UTF-8 instead of the spec-mandated ASCII, or a marker such as `ONLINE` —
+//! 1. Comparability first. Matching never fails just because strings differ.
+//!    If the merchant city cannot be interpreted as a place (a QR encoded as
+//!    UTF-8 instead of the spec-mandated ASCII, or a marker such as `ONLINE`),
 //!    the layer reports `NOT COMPARABLE` instead of a fabricated anomaly.
-//! 2. **Tiered penalties, not a binary.** Different mismatch shapes carry
+//! 2. Tiered penalties, not a binary. Different mismatch shapes carry
 //!    different weight, and none of them alone is allowed to force HIGH RISK.
-//! 3. **Distance.** An optional coarse distance (from a device coarse fix to a
+//! 3. Distance. An optional coarse distance (from a device coarse fix to a
 //!    city reference point) turns "different name" into "different name and 1200
 //!    km away", which is a materially stronger claim.
 //!
-//! # Honesty note on the gazetteer
+//! # The city table
 //!
-//! The city table here is deliberately small and hand-curated for the demo
-//! corridor (Java/Bali), not the ~514 Indonesian kabupaten/kota. A city that is
-//! not in the table still gets the name-based tiers; it only loses the distance
+//! The city table here is small and hand-curated for the demo corridor
+//! (Java/Bali), not the ~514 Indonesian kabupaten/kota. A city that is not in
+//! the table still gets the name-based tiers; it only loses the distance
 //! refinement. Adding the full administrative dataset is a data task, not a
-//! logic change, and the table is the seam for it.
+//! logic change.
 
 use serde::{Deserialize, Serialize};
 
@@ -140,9 +140,8 @@ pub struct GeofenceResult {
     pub location_available: bool,
     /// Whether the comparison actually happened.
     ///
-    /// This is the field Layer 3 was missing: a skipped check must be
-    /// distinguishable from a passed check, otherwise "we did not look" reads as
-    /// "we looked and it was fine".
+    /// A skipped check must be distinguishable from a passed check, otherwise
+    /// "we did not look" reads as "we looked and it was fine".
     pub evaluated: bool,
 }
 
@@ -204,11 +203,11 @@ const NON_GEOGRAPHIC_MARKERS: [&str; 6] = ["ONLINE", "INTERNET", "E-COMMERCE", "
 
 /// Normalises a city name into a comparison token.
 ///
-/// Deliberately conservative: it uppercases, strips punctuation and
-/// administrative prefixes, and nothing else. It does **not** do fuzzy matching,
-/// because a fuzzy matcher that treats `SURABAYA` and `SEMARANG` as similar
-/// would make the layer silently useless — see the module docs on why a
-/// false negative here is worse than a false positive.
+/// Conservative by design: it uppercases, strips punctuation and administrative
+/// prefixes, and nothing else. It does not do fuzzy matching, because a fuzzy
+/// matcher that treats `SURABAYA` and `SEMARANG` as similar would make the layer
+/// silently useless (see the module docs on why a false negative here is worse
+/// than a false positive).
 fn normalize(input: &str) -> String {
     let upper = input.to_uppercase();
     let mut cleaned = String::with_capacity(upper.len());
@@ -269,9 +268,9 @@ fn score_mismatch(distance_km: Option<f64>, on_border: bool) -> (f64, &'static s
 ///
 /// # Arguments
 ///
-/// * `client_city` — city name from reverse geocoding, when available.
-/// * `merchant_city` — Tag 60 value from the payload.
-/// * `client_fix` — optional coarse `(lat, lon)` for a distance estimate.
+/// * `client_city`: city name from reverse geocoding, when available.
+/// * `merchant_city`: Tag 60 value from the payload.
+/// * `client_fix`: optional coarse `(lat, lon)` for a distance estimate.
 pub fn process_layer3_geofence(
     client_city: Option<&str>,
     merchant_city: Option<&str>,
@@ -329,7 +328,7 @@ pub fn process_layer3_geofence(
 
     // Non-ASCII cannot be a valid Tag 60 value (EMVCo requires the ASCII subset)
     // and is usually a UTF-8 encoding bug. Fabricating an anomaly from our own
-    // decoding mistake would be worse than declining to compare.
+    // decoding mistake is the wrong response, so the layer declines to compare.
     if !merchant_city.is_ascii() {
         return result(
             0.0,
@@ -394,7 +393,7 @@ pub fn process_layer3_geofence(
         // the client city to be in the table too.
         (None, Some(m)) => client_ref.map(|c| haversine_km((m.lat, m.lon), (c.lat, c.lon))),
         // Merchant city is not in the table, so there is nothing to measure
-        // against. Note this branch also catches `fix = None` with an unknown
+        // against. This branch also catches `fix = None` with an unknown
         // merchant, which is why it is the catch-all.
         _ => None,
     };
@@ -508,7 +507,7 @@ mod tests {
     #[test]
     fn different_administrative_levels_are_same_metro() {
         // Both normalise to BANDUNG, so this is an exact match after
-        // normalisation — which is the correct and cheapest answer.
+        // normalisation, which is the correct and cheapest answer.
         let r = process_layer3_geofence(Some("KABUPATEN BANDUNG"), Some("KOTA BANDUNG"), None);
         assert_eq!(r.l3_score, 0.0);
         assert_eq!(r.mismatch_kind, "MATCH");
@@ -657,8 +656,8 @@ mod tests {
     fn null_island_fix_is_rejected() {
         // (0,0) is a classic placeholder. It must not be trusted as a position.
         // The fallback then compares the two city reference points, so the tier
-        // is the nearby one — and crucially it must match the no-fix case
-        // exactly, proving the bogus fix was discarded rather than used.
+        // is the nearby one, and it must match the no-fix case exactly, proving
+        // the bogus fix was discarded rather than used.
         let with_bogus = process_layer3_geofence(Some("Bandung"), Some("JAKARTA"), Some((0.0, 0.0)));
         let no_fix = process_layer3_geofence(Some("Bandung"), Some("JAKARTA"), None);
 
@@ -672,7 +671,7 @@ mod tests {
     #[test]
     fn out_of_range_fix_is_rejected() {
         // An invalid fix is dropped, not used. The fallback then compares the
-        // two known city reference points, so a distance still exists — but it
+        // two known city reference points, so a distance still exists, but it
         // must have come from the references, confirmed by the nearby tier.
         let r = process_layer3_geofence(Some("Bandung"), Some("JAKARTA"), Some((999.0, 999.0)));
         let without = process_layer3_geofence(Some("Bandung"), Some("JAKARTA"), None);
@@ -719,7 +718,7 @@ mod tests {
 
     #[test]
     fn normalize_does_not_fuzzy_match_different_cities() {
-        // Guards the deliberate no-fuzzy-matching decision.
+        // Guards the no-fuzzy-matching decision.
         assert_ne!(normalize("SURABAYA"), normalize("SEMARANG"));
         assert_ne!(normalize("MEDAN"), normalize("MANADO"));
     }

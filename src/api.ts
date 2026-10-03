@@ -107,7 +107,7 @@ export async function cameraDiagnostics(): Promise<CameraDiagnostics> {
  * A burst rather than one frame because Layer 1's temporal glare check needs a
  * series to tell a moving highlight from a static bright patch.
  *
- * Only metadata crosses the IPC boundary — the pixel buffers stay in Rust, so
+ * Only metadata crosses the IPC boundary. The pixel buffers stay in Rust, so
  * this stays fast regardless of resolution.
  */
 export async function captureAndAnalyze(
@@ -145,7 +145,7 @@ export async function cameraPreview(maxWidth?: number): Promise<PreviewFrame> {
  * Analyses a raw RGB frame without a camera.
  *
  * This is the `imported_image` path: pixels arrive over IPC so Layer 1 can run
- * on them. Reserved for a real image-decoding flow — see the UI note about why
+ * on them. Reserved for a real image-decoding flow; see the UI note about why
  * the current picker does not use it yet.
  */
 export async function analyzeImageFrame(
@@ -260,29 +260,4 @@ export async function historyVerify(): Promise<[boolean, string]> {
 
 export async function historyClear(): Promise<void> {
   return invoke<void>("history_clear");
-}
-
-// ---------------------------------------------------------------------------
-// Report
-// ---------------------------------------------------------------------------
-
-/**
- * Renders a scan as a text or HTML document, entirely on-device.
- *
- * The Rust side returns a string and never uploads anything, so the "no data
- * leaves the device" guarantee holds even for the feature whose purpose is
- * sharing a finding.
- */
-export async function generateReport(
-  snapshot: ScanSnapshot,
-  source: string,
-  format: "text" | "html" = "text",
-  timestampMs?: number,
-): Promise<string> {
-  return invoke<string>("generate_report", {
-    snapshot,
-    source,
-    format,
-    timestampMs: timestampMs ?? null,
-  });
 }

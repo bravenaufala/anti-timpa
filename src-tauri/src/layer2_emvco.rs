@@ -1,12 +1,12 @@
-//! Layer 2 — EMVCo MPM payload validation.
+//! Layer 2: EMVCo MPM payload validation.
 //!
-//! Direct port of `layer2_emvco.py`:
+//! Tag-Length-Value parsing and rule-based risk scoring:
 //!   * `parse_emvco_tlv`       -> Tag-Length-Value parser (flat + nested)
 //!   * `verify_crc16`          -> CRC-16/CCITT-FALSE
 //!   * `process_layer2_tlv`    -> rule-based risk scoring
 //!
-//! The parsing and scoring rules are deliberately kept identical to the Python
-//! implementation so existing fixtures in `test_layer2.py` remain the spec.
+//! The parsing and scoring rules follow the EMVCo MPM specification, so the
+//! existing fixtures remain the spec.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -19,6 +19,14 @@ pub struct Layer2Result {
     pub mcc: String,
     pub merchant_name: String,
     pub merchant_city: String,
+    /// National Merchant ID (NMID) or equivalent, read from the nested merchant
+    /// account sub-TLVs (tags 26..=51).
+    ///
+    /// This is surfaced for *reporting*, not verification: the identifier is the
+    /// cross-check key a bank or PSP looks up server-side. Anti Timpa has no
+    /// reference database, so it shows the value rather than asserting the
+    /// account behind it is legitimate.
+    pub merchant_id: String,
     pub parsed_tlv: Value,
     pub warnings: Vec<String>,
 }
@@ -127,7 +135,30 @@ pub fn verify_crc16(raw: &str) -> bool {
     calculated.eq_ignore_ascii_case(expected_crc)
 }
 
-/// Convenience accessor mirroring the Python `str(parsed_tlv.get(tag, ""))`.
+/// Reads the merchant account identifier from the nested merchant account
+/// sub-TLVs (tags 26..=51).
+///
+/// EMVCo carries the national merchant id as a sub-tag of one of these tags;
+/// Indonesian QRIS conventionally puts the NMID under sub-tag `01` or `02`.
+/// Returns an empty string when no such sub-tag exists, so the caller can tell
+/// "no account id in the payload" from a value.
+fn merchant_account_id(tlv: &Map<String, Value>) -> String {
+    for tag in 26..=51u32 {
+        let key = format!("{tag:02}");
+        if let Some(Value::Object(sub)) = tlv.get(&key) {
+            for sub_tag in ["02", "01"] {
+                if let Some(Value::String(v)) = sub.get(sub_tag) {
+                    if !v.trim().is_empty() {
+                        return v.clone();
+                    }
+                }
+            }
+        }
+    }
+    String::new()
+}
+
+/// Convenience accessor: the tag's value as a string, empty when absent.
 fn tag_str(tlv: &Map<String, Value>, tag: &str) -> String {
     match tlv.get(tag) {
         Some(Value::String(s)) => s.clone(),
@@ -178,6 +209,10 @@ pub fn process_layer2_tlv(raw: &str, optical_type: Option<&str>) -> Layer2Result
     let payload_format = parsed.as_ref().map(|m| tag_str(m, "00")).unwrap_or_default();
     let currency = parsed.as_ref().map(|m| tag_str(m, "53")).unwrap_or_default();
     let country = parsed.as_ref().map(|m| tag_str(m, "58")).unwrap_or_default();
+    let merchant_id = parsed
+        .as_ref()
+        .map(merchant_account_id)
+        .unwrap_or_default();
 
     // Fine-grained rules only apply to structurally valid, checksum-clean payloads.
     if crc_valid && valid {
@@ -228,6 +263,7 @@ pub fn process_layer2_tlv(raw: &str, optical_type: Option<&str>) -> Layer2Result
         mcc,
         merchant_name,
         merchant_city,
+        merchant_id,
         parsed_tlv,
         warnings,
     }

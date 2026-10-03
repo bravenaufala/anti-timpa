@@ -1,9 +1,8 @@
 //! Synthetic camera backend.
 //!
 //! Generates deterministic frames containing a QR-like pattern with an
-//! optional sticker anomaly and glare. This is the direct successor to the
-//! synthetic generator in `main_mobile.py`, and crucially makes the whole
-//! camera -> analysis pipeline unit-testable without hardware.
+//! optional sticker anomaly and glare, so the whole camera -> analysis
+//! pipeline is unit-testable without hardware.
 
 use super::{CameraBackend, CameraError, Frame};
 
@@ -20,11 +19,11 @@ pub struct SyntheticSpec {
     /// Radius of a bright specular highlight. Varies frame-to-frame to
     /// exercise the Layer 1 temporal glare variance.
     pub glare_radius: u32,
-    /// Payload for a **real, decodable** QR symbol rendered inside `qr_bbox`.
+    /// Payload for a real, decodable QR symbol rendered inside `qr_bbox`.
     ///
     /// `None` keeps the old geometric stand-in (finder-pattern squares), which
     /// is enough to exercise the texture and margin metrics but is not a valid
-    /// QR. Set this when a test needs the pipeline to actually reach the payload
+    /// QR. Set this when a test needs the pipeline to reach the payload
     /// layers, which is what makes an end-to-end assertion possible.
     pub qr_payload: Option<String>,
 }
@@ -34,8 +33,7 @@ impl Default for SyntheticSpec {
         Self {
             width: 640,
             height: 480,
-            // Matches the geometry used by `test_layer1.py` so the same
-            // expectations hold in both languages.
+            // Quiet-zone geometry used by the Layer 1 synthetic fixtures.
             qr_bbox: (200, 140, 240, 240),
             sticker_anomaly: false,
             glare_radius: 0,
@@ -152,8 +150,8 @@ impl CameraBackend for SyntheticBackend {
         let h = self.spec.height;
         let (qx, qy, qw, qh) = self.spec.qr_bbox;
 
-        // Off-white paper background (deliberately below the glare threshold
-        // of 220 so only the synthetic highlight counts as glare).
+        // Off-white paper background, below the glare threshold of 220 so
+        // only the synthetic highlight counts as glare.
         let mut rgb = vec![195u8; (w * h * 3) as usize];
 
         // 1. Quiet zone paper margin.
@@ -261,10 +259,10 @@ impl CameraBackend for SyntheticBackend {
 }
 
 impl SyntheticBackend {
-    /// Cycles through glare radii [0, 40, 10, 50, 5], matching the sequence in
-    /// `test_layer1.py::test_temporal_glare_variance`. Single-frame callers
-    /// therefore still see a plausible image, while repeated captures produce
-    /// a glare variance the temporal Layer 1 check can detect.
+    /// Cycles through glare radii [0, 40, 10, 50, 5], the sequence the
+    /// temporal glare-variance test relies on. Single-frame callers therefore
+    /// still see a plausible image, while repeated captures produce a glare
+    /// variance the temporal Layer 1 check can detect.
     fn cycle_glare(&self) -> u32 {
         const CYCLE: [u32; 5] = [0, 40, 10, 50, 5];
         CYCLE[self.tick % CYCLE.len()]
@@ -274,9 +272,9 @@ impl SyntheticBackend {
     ///
     /// Exists because the geometric stand-in (border plus finder-pattern
     /// squares) is not a valid QR and therefore never decodes. That made every
-    /// test stop *before* the decode step, so nothing exercised the path from a
-    /// frame all the way through to a layer result — the exact seam where a
-    /// regression would be invisible.
+    /// test stop before the decode step, so nothing exercised the path from a
+    /// frame all the way through to a layer result, the seam where a regression
+    /// would be invisible.
     ///
     /// Module size is derived from the symbol dimensions so the caller keeps
     /// control of the bounding box, and the symbol is centred inside it.
@@ -318,9 +316,9 @@ impl SyntheticBackend {
             return;
         }
 
-        // Integer module size keeps every module the same pixel footprint, which
-        // matters because a non-integer scale produces uneven module edges that
-        // read as spurious texture.
+        // Integer module size keeps every module the same pixel footprint; a
+        // non-integer scale produces uneven module edges that read as spurious
+        // texture.
         let module_px = (qw.min(qh) as i64 / count).max(1);
         let total = module_px * count;
 
@@ -375,8 +373,8 @@ impl SyntheticBackend {
 /// Dark module and light module colours for a rendered symbol.
 ///
 /// Pure black/white rather than the off-white paper tone: the printed symbol
-/// needs maximum contrast for the decoder, while the surrounding *paper* is
-/// what carries the off-white tone.
+/// needs maximum contrast for the decoder, while the surrounding paper carries
+/// the off-white tone.
 const QR_DARK: [u8; 3] = [0, 0, 0];
 const QR_LIGHT: [u8; 3] = [255, 255, 255];
 

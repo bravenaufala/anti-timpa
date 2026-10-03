@@ -6,11 +6,10 @@
 //! cargo run --example list_cameras --features desktop-camera
 //! ```
 //!
-//! Exists because "camera not found" is otherwise indistinguishable from
+//! This exists because "camera not found" is otherwise indistinguishable from
 //! "wrong index" or "permission denied", and those need different fixes. On a
-//! typical Linux laptop the camera is often NOT `/dev/video0`, and UVC devices
-//! expose extra nodes that open but never deliver video — both of which this
-//! makes obvious.
+//! typical Linux laptop the camera is often not `/dev/video0`, and UVC devices
+//! expose extra nodes that open but never deliver video.
 
 use nokhwa::pixel_format::RgbFormat;
 use nokhwa::utils::{ApiBackend, CameraIndex, RequestedFormat, RequestedFormatType};
@@ -78,9 +77,9 @@ fn main() {
         }
         print!("stream OK ");
 
-        // A device can open and stream yet still never deliver frames — which
-        // is exactly what a UVC metadata node does. Grabbing a frame is the
-        // only conclusive check.
+        // A device can open and stream yet still never deliver frames, which
+        // is what a UVC metadata node does. Grabbing a frame is the only
+        // conclusive check.
         match camera.frame() {
             Ok(buf) => println!(
                 "FRAME OK {}x{} format={}",

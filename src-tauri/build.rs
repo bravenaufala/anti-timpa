@@ -11,7 +11,7 @@ fn main() {
     // treated as a root, so it survives to the final `.so`.
     //
     // Passed via `cargo:rustc-link-arg` (not `rustflags`) so it only applies to
-    // the final link, and only for Android targets — the host build has no JNI
+    // the final link, and only for Android targets. The host build has no JNI
     // entry points to preserve.
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
 

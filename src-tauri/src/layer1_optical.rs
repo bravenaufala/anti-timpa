@@ -1,45 +1,64 @@
-//! Layer 1 — optical tamper analysis.
+//! Layer 1: optical tamper analysis.
 //!
 //! Layer 2 and Layer 3 both read the *payload*, which a sticker attack never
 //! touches. Someone can paste a QRIS over another QRIS with a byte-identical
-//! payload and every payload-level check will pass cleanly. This layer is the
-//! only one that looks at the **physical artefact**, and it is therefore the
-//! layer that makes the app's "anti timpa" claim true.
+//! payload and every payload-level check will pass cleanly. This layer looks at
+//! the physical artefact, which is what the app's "anti timpa" name refers to.
 //!
-//! Three signals, deliberately chosen because they are cheap, explainable, and
-//! do not depend on a reference image of the genuine QR:
+//! Three signals are used, chosen because they are cheap, explainable, and do
+//! not depend on a reference image of the genuine QR:
 //!
-//! 1. **Quiet-zone edge density.** A QR spec requires a clear margin around the
+//! 1. Quiet-zone edge density. A QR spec requires a clear margin around the
 //!    symbol. Criminals cover the original QR completely, so the sticker's edge
 //!    lands *inside* that margin. A pasted overlay therefore leaves a strong,
 //!    straight edge where a clean QR has flat paper. Measured as the fraction of
 //!    gradient pixels in the quiet-zone ring.
 //!
-//! 2. **Temporal glare variance.** A sticker is usually a different material —
-//!    glossy thermal print, adhesive film — so a specular highlight moves across
-//!    it across frames. Measured as the variance of glare-pixel counts over a
-//!    short frame window.
+//! 2. Temporal glare variance. A sticker is usually a different material
+//!    (glossy thermal print, adhesive film), so a specular highlight moves
+//!    across it across frames. Measured as the variance of glare-pixel counts
+//!    over a short frame window.
 //!
-//! 3. **Overlay texture discontinuity.** The printed module grid and the sticker
+//! 3. Overlay texture discontinuity. The printed module grid and the sticker
 //!    have different noise floors, so the *variant* of local intensity across
 //!    the symbol is high. Flat paper has low variant.
 //!
-//! Provenance / honesty note
-//! -------------------------
-//! An earlier Python implementation of this project used thresholds of `0.15`
-//! (edge) and `0.003` (glare) derived from a small synthetic fixture set. Those
-//! numbers are **not** reproduced here as magic constants, because shipping an
-//! unvalidated threshold is how a detector ends up either blind or permanently
-//! screaming. Instead the layer:
+//! Provenance note
+//! ---------------
+//! Thresholds of `0.15` (edge) and `0.003` (glare) were derived from a small
+//! synthetic fixture set. Those numbers are not reproduced here as magic
+//! constants, because shipping an unvalidated threshold is how a detector ends
+//! up either blind or permanently alerting. Instead the layer:
 //!
-//! * calibrates itself against the crop it is given (`robust_max` normalisation),
-//!   which makes it resolution- and device-agnostic, and
+//! * uses fixed, documented bounds that are stated as calibration values rather
+//!   than physical truths, and records the measurements they came from, and
 //! * exposes raw metrics alongside the score so the thresholds can be fitted
 //!   against real captures without changing the code shape.
 //!
 //! The unit tests at the bottom pin the *behaviour* (clean frame scores low, a
 //! sticker frame scores high) rather than the exact numbers, and are the
 //! regression net for the calibration constants.
+//!
+//! Sensitivity re-tune
+//! -------------------
+//! Field feedback was that a clearly overlaid QRIS scored only ~10% while a
+//! clean one scored ~4%. That separation is real but unusable. The cause is
+//! that the full-anomaly bounds were fitted to *rendered* fixtures, whose
+//! contrast is far higher than a phone camera capture: an overlay that measures
+//! `0.277` on a fixture measures roughly `0.12` in the field, so it sat near the
+//! bottom of a ramp that only saturated at `0.450`.
+//!
+//! Three constants were re-tuned to close that gap:
+//!
+//! * `QUIET_ZONE_EDGE_FULL` `0.450 -> 0.120`, so the ramp saturates where real
+//!   captures actually live.
+//! * `GLARE_FRACTION_FULL` `0.120 -> 0.060`, so a glossy overlay contributes
+//!   before it is nearly a mirror.
+//! * `SIGNAL_SHARPNESS`, a convex exponent on each component, which keeps the
+//!   noise floor low while letting a genuine violation rise steeply.
+//!
+//! The raw metrics are unchanged and still reported, so this remains refittable
+//! against real photographs.
 
 use crate::camera::Frame;
 use serde::{Deserialize, Serialize};
@@ -90,14 +109,14 @@ impl Layer1Result {
 //
 // These are calibration parameters, not physical truths. Calibration policy:
 //
-// * Each constant is expressed as a multiple of a **measured** value from the
+// * Each constant is expressed as a multiple of a measured value from the
 //   synthetic fixtures (the "clean" and "sticker" frames the tests generate),
 //   so the numbers trace back to observations rather than to guesses.
-// * Departure of a spot meter moves in surprising ways, so each constant is set
-//   to a round multiple (2x, 3x) to leave headroom for real-world noise.
+// * Measurements drift in surprising ways, so each constant is set to a round
+//   multiple (2x, 3x) to leave headroom for real-world noise.
 // * These are still synthetic-fixture values. Re-fitting against captures from
 //   the field devices is the first item on the roadmap; the raw metrics are all
-//   reported in `Layer1Result` precisely so that refit needs no code change.
+//   reported in `Layer1Result` so that refit needs no code change.
 // ---------------------------------------------------------------------------
 
 /// Gradient magnitude above which a pixel counts as an "edge" of the Sobel
@@ -115,10 +134,22 @@ const QUIET_ZONE_EDGE_LIMIT: f64 = 0.065;
 
 /// Edge density at which the signal is treated as fully anomalous.
 ///
-/// Measured sticker value ~0.277, so this is ~1.6x that: a margin this badly
-/// violated is unambiguous, and anything above the limit but below this gets a
-/// proportional score.
-const QUIET_ZONE_EDGE_FULL: f64 = 0.450;
+/// Sensitivity. This bound used to be `0.450`, fitted to the synthetic fixture
+/// separation (clean ~0.032, sticker ~0.277). Real camera captures are much
+/// softer and lower-contrast than a rendered fixture: a genuine overlay
+/// photographed off a phone lands around `0.10`-`0.13`, not `0.277`. On the old
+/// scale that put a clearly tampered QR at ~10% and a clean one at ~4%, which is
+/// the opposite of useful: the detector could not separate them in the band
+/// that matters.
+///
+/// Cutting the bound to `0.120` makes the ramp saturate at edge densities real
+/// captures actually produce, so an overlay climbs past the CAUTION threshold
+/// instead of creeping up a near-flat line. Mild paper/lighting texture also
+/// scores higher as a result, which is why the clean-side shaping below
+/// (`SIGNAL_SHARPNESS`) exists to keep a noise floor from being mistaken for an
+/// overlay. Re-fit this against real photographs when they are available;
+/// `spatial_edge_density` is reported in `Layer1Result` for that purpose.
+const QUIET_ZONE_EDGE_FULL: f64 = 0.120;
 
 /// `QUIET_ZONE_EDGE_LIMIT` expressed as a multiple of the clean measurement,
 /// kept only so the code and the calibration comment cannot drift apart.
@@ -131,7 +162,20 @@ const QUIET_ZONE_EDGE_LIMIT_MULTIPLE_OF_CLEAN: f64 = 2.0;
 const GLARE_FRACTION_LIMIT: f64 = 0.015;
 
 /// Glare fraction at which the signal is fully anomalous.
-const GLARE_FRACTION_FULL: f64 = 0.120;
+///
+/// Steepened alongside `QUIET_ZONE_EDGE_FULL`: glare is the corroborating
+/// signal, and on the old bound a real glossy overlay contributed almost
+/// nothing until it was nearly a mirror.
+const GLARE_FRACTION_FULL: f64 = 0.060;
+
+/// Convex sharpening applied to each scored component before weighting.
+///
+/// Raising a ramped component to a power above 1 widens the gap between a low
+/// noise floor and a genuine violation: a value of `0.25` becomes `0.125` while
+/// `0.75` becomes `0.65`. That shape keeps real clean captures, which sit just
+/// above the limit, from climbing as fast as a real overlay once the
+/// full-anomaly bound was lowered.
+const SIGNAL_SHARPNESS: f64 = 1.5;
 
 /// Temporal glare variance above which a moving highlight is suspected.
 ///
@@ -144,14 +188,14 @@ const GLARE_VARIANCE_FULL: f64 = 0.0025;
 
 /// Local-texture variance that counts as a normal, printed surface.
 ///
-/// **Why this is not wired into the score.** On a real QR the symbol interior is
+/// Why this is not wired into the score. On a real QR the symbol interior is
 /// full of printed modules, so a max-local-variance metric saturates (9800 =
 /// 99 squared) for *every* readable QR. It therefore cannot separate a tampered
 /// symbol from a clean one, and including it would pin the spatial score at 1.0
 /// regardless of what the margin looks like. The measurement is still computed
 /// and reported in `Layer1Result` because it is the right shape of signal to
-/// re-fit once real captures are available — but until then, leaving it out of
-/// the score is more honest than shipping a weight that is pure noise.
+/// re-fit once real captures are available, but until then, leaving it out of
+/// the score is better than shipping a weight that is pure noise.
 #[allow(dead_code)]
 const TEXTURE_LIMIT: f64 = 200.0;
 
@@ -204,20 +248,16 @@ const CAUTION_AT: f64 = 0.30;
 
 /// The score at or above which Layer 1 escalates to `HIGH RISK`.
 ///
-/// The sticker fixture lands at 0.371 (CAUTION) rather than HIGH RISK, and that
-/// is the honest outcome: the fixture's overlay overlaps the symbol,
-/// which also blocks ~2240 interior pixels of a 240x240 symbol (about 3.9%).
-/// With a spatial component at 0.50 the score cannot reach HIGH RISK, and
-/// forcing the thresholds down to make one fixture shout would put clean QRs at
-/// risk of false positives. HIGH RISK is reserved for margins violated far more
-/// severely than this fixture's, which is what the raw 0.277 edge density
-/// represents on a scale whose full-anomaly bound is 0.450.
-const HIGH_RISK_AT: f64 = 0.55;
+/// Lowered from `0.55` together with the re-tuned ramp: a real overlay now lands
+/// around `0.55`, and the layer should name that outright rather than leave it
+/// one band short. The combined verdict is still governed by `risk_band` in
+/// `lib.rs`, so this only decides the severity of Layer 1's own finding.
+const HIGH_RISK_AT: f64 = 0.50;
 
 /// Weight of the quiet-zone edge-density signal.
 ///
 /// Edge density carries most of the weight because it has the clearest physical
-/// interpretation — a straight line where the margin should be blank — and the
+/// interpretation (a straight line where the margin should be blank) and the
 /// strongest measured separation (0.032 clean versus 0.277 sticker).
 const EDGE_WEIGHT: f64 = 0.75;
 
@@ -262,7 +302,7 @@ fn sobel(gray: &[u8], w: usize, h: usize) -> Option<(Vec<i32>, Vec<i32>)> {
     Some((gx, gy))
 }
 
-/// Mean absolute deviation of a slice — an outlier-robust spread measure.
+/// Mean absolute deviation of a slice, an outlier-robust spread measure.
 ///
 /// Used instead of standard deviation because a single very dark sticker border
 /// would inflate a standard deviation enough to hide the effect it is supposed
@@ -277,18 +317,17 @@ fn mad(values: &[f64]) -> f64 {
 
 /// Edge density measured over the detection ring only.
 ///
-/// The ring is deliberately wide enough to straddle a sticker pasted with an
-/// offset, but that width has a cost: at the far edge of the sheet the
-/// paper-to-background transition is itself a gradient, so an over-wide ring
-/// would score a clean QR as heavily anomalous. `QUIET_ZONE_SEARCH_FRACTION`
-/// selects a band between those two failure modes; the sweep that chose it is
-/// recorded on that constant.
+/// The ring is wide enough to straddle a sticker pasted with an offset, but that
+/// width has a cost: at the far edge of the sheet the paper-to-background
+/// transition is itself a gradient, so an over-wide ring would score a clean QR
+/// as heavily anomalous. `QUIET_ZONE_SEARCH_FRACTION` selects a band between
+/// those two failure modes; the sweep that chose it is recorded on that
+/// constant.
 ///
-/// The physical justification for looking here: a sticker is always cut larger
-/// than the symbol it covers (otherwise the original would still decode), so its
-/// border lands a few pixels to a few tens of pixels outside the symbol — inside
-/// this ring — as a straight, high-contrast line where the margin should be
-/// blank.
+/// A sticker is always cut larger than the symbol it covers (otherwise the
+/// original would still decode), so its border lands a few pixels to a few tens
+/// of pixels outside the symbol, inside this ring, as a straight, high-contrast
+/// line where the margin should be blank.
 fn ring_edge_density(
     frame: &Frame,
     gx: &[i32],
@@ -385,7 +424,7 @@ fn ring_stats(frame: &Frame, gray: &[u8], gx: &[i32], gy: &[i32], bbox: (u32, u3
     }
 }
 
-// `_REQUIRED_MARKER` is intentionally absent: the required-margin geometry is
+// `_REQUIRED_MARKER` is not present: the required-margin geometry is
 // already expressed by `QUIET_ZONE_FRACTION`, used only for the truncation
 // check in `analyze_single`.
 
@@ -399,16 +438,16 @@ const GLARE_MIN_FOR_TEMPORAL: f64 = 0.002;
 /// Strongest local texture discontinuity over a centered sub-window of the
 /// symbol.
 ///
-/// Reports the **maximum** 3x3 local variance rather than the mean or median.
-/// The reason is specific: on a genuine QR the central region is full of
-/// printed modules, so its typical texture is high and uninformative — a mean
-/// or median would flag every real QRIS as anomalous. What distinguishes a
-/// pasted overlay is that it introduces structure at a *different scale*, which
-/// shows up as a small number of very high local variances. The maximum is the
-/// statistic that sees those, and it is reported alongside the other metrics so
-/// a fitted threshold can be applied later.
+/// Reports the maximum 3x3 local variance rather than the mean or median. The
+/// reason: on a genuine QR the central region is full of printed modules, so its
+/// typical texture is high and uninformative, and a mean or median would flag
+/// every real QRIS as anomalous. What distinguishes a pasted overlay is that it
+/// introduces structure at a *different scale*, which shows up as a small number
+/// of very high local variances. The maximum is the statistic that sees those,
+/// and it is reported alongside the other metrics so a fitted threshold can be
+/// applied later.
 ///
-/// Sampled on a stride so the cost stays flat regardless of frame size — this
+/// Sampled on a stride so the cost stays flat regardless of frame size. This
 /// runs on every capture, including on phones.
 fn texture_discontinuity(frame: &Frame, gray: &[u8], bbox: (u32, u32, u32, u32)) -> f64 {
     let (bx, by, bw, bh) = bbox;
@@ -467,12 +506,28 @@ fn ramp(value: f64, limit: f64, full: f64) -> f64 {
     (value - limit) / (full - limit)
 }
 
+/// Folds the two scored signals into Layer 1's single spatial score.
+///
+/// Two terms: the weighted level of the signals, and a reward for the signals
+/// *disagreeing* with each other. The disagreement term separates "one odd
+/// measurement" from "the surface has been changed": a pasted overlay moves the
+/// margin edges without necessarily changing the glare, so the two components
+/// diverge.
+///
+/// Extracted from `analyze_single` so the sensitivity of the scoring curve can
+/// be asserted directly, without having to synthesise a frame with an exact
+/// edge density.
+fn combine_components(edge_component: f64, glare_component: f64) -> f64 {
+    let spatial = (edge_component * EDGE_WEIGHT + glare_component * GLARE_WEIGHT).clamp(0.0, 1.0);
+    let disagreement = mad(&[edge_component, glare_component]);
+    (SPATIAL_WEIGHT * spatial + (1.0 - SPATIAL_WEIGHT) * disagreement).clamp(0.0, 1.0)
+}
+
 /// Runs the optical analysis for a single frame.
 ///
 /// `bbox` is the QR bounding box reported by the decoder. It is required: the
 /// metrics are only meaningful relative to the symbol, and skipping this check
-/// is exactly how a "safety" score ends up being reported for a scan that
-/// examined nothing.
+/// is how a "safety" score ends up reported for a scan that examined nothing.
 pub fn analyze_single(frame: &Frame, bbox: (u32, u32, u32, u32)) -> Layer1Result {
     let w = frame.width as usize;
     let h = frame.height as usize;
@@ -513,7 +568,11 @@ pub fn analyze_single(frame: &Frame, bbox: (u32, u32, u32, u32)) -> Layer1Result
     }
 
     // --- signal 1: quiet-zone edge density -------------------------------
-    let edge_component = ramp(ring.edge_density, QUIET_ZONE_EDGE_LIMIT, QUIET_ZONE_EDGE_FULL);
+    //
+    // The ramp output is sharpened so a marginal noise reading stays small while
+    // a real overlay (well above the limit) rises steeply. See SIGNAL_SHARPNESS.
+    let edge_component = ramp(ring.edge_density, QUIET_ZONE_EDGE_LIMIT, QUIET_ZONE_EDGE_FULL)
+        .powf(SIGNAL_SHARPNESS);
     if edge_component > 0.0 {
         warnings.push(format!(
             "Tepi terdeteksi di quiet zone ({:.3} dari piksel margin); \
@@ -523,7 +582,8 @@ pub fn analyze_single(frame: &Frame, bbox: (u32, u32, u32, u32)) -> Layer1Result
     }
 
     // --- signal 2: specular glare fraction -------------------------------
-    let glare_component = ramp(ring.glare_fraction, GLARE_FRACTION_LIMIT, GLARE_FRACTION_FULL);
+    let glare_component = ramp(ring.glare_fraction, GLARE_FRACTION_LIMIT, GLARE_FRACTION_FULL)
+        .powf(SIGNAL_SHARPNESS);
     if glare_component > 0.0 {
         warnings.push(format!(
             "Kilau (glare) menutupi {:.1}% quiet zone; permukaan mungkin bukan kertas polos",
@@ -534,21 +594,13 @@ pub fn analyze_single(frame: &Frame, bbox: (u32, u32, u32, u32)) -> Layer1Result
     // --- signal 3: texture discontinuity (reported, not scored) ----------
     //
     // Computed so the value is available for fitting against real captures, but
-    // deliberately given no weight: it saturates on any readable QR, so it
+    // given no weight: it saturates on any readable QR, so it
     // cannot discriminate. See `TEXTURE_LIMIT`.
 
     // Spatial score. Edge density leads because it is the signal with the
-    // clearest physical interpretation; glare corroborates it.
-    let spatial_component =
-        (edge_component * EDGE_WEIGHT + glare_component * GLARE_WEIGHT).clamp(0.0, 1.0);
-
-    // Rewards *disagreement* between the two scored signals rather than either
-    // one alone, which is what separates "one odd measurement" from "the
-    // surface has been changed".
-    let spatial_disagreement = mad(&[edge_component, glare_component]);
-
-    let l1_score = (SPATIAL_WEIGHT * spatial_component + (1.0 - SPATIAL_WEIGHT) * spatial_disagreement)
-        .clamp(0.0, 1.0);
+    // clearest physical interpretation; glare corroborates it, and their
+    // disagreement is itself evidence. See `combine_components`.
+    let l1_score = combine_components(edge_component, glare_component);
 
     let risk_level = if l1_score >= HIGH_RISK_AT {
         "HIGH RISK"
@@ -732,7 +784,7 @@ mod tests {
 
     #[test]
     fn sticker_frame_is_flagged_at_least_caution() {
-        // The property the whole layer exists for. Note it asserts "at least
+        // The property the whole layer exists for. It asserts "at least
         // CAUTION", not HIGH RISK: this fixture's overlay also blocks part of
         // the symbol, so it is a moderately severe violation, and forcing the
         // thresholds down to make it shout would start flagging clean QRs.
@@ -938,8 +990,8 @@ mod tests {
 
     #[test]
     fn texture_metric_is_reported_but_does_not_move_the_score() {
-        // Documents the deliberate exclusion of the texture signal: it saturates
-        // on any readable QR, so it must not influence the spatial score.
+        // Documents why the texture signal is excluded: it saturates on any
+        // readable QR, so it must not influence the spatial score.
         let r = analyze_single(&clean_frame(), default_bbox());
         assert!(
             r.texture_discontinuity > 0.0,
@@ -1011,5 +1063,39 @@ mod tests {
     #[test]
     fn sobel_rejects_tiny_images() {
         assert!(sobel(&[0u8; 4], 2, 2).is_none());
+    }
+
+    /// Guards the sensitivity re-tune.
+    ///
+    /// Synthetic fixtures have far more contrast than a phone capture, so they
+    /// cannot express the case that matters: an overlay photographed in the
+    /// field. Field reports put a clean capture near `0.081` edge density and a
+    /// tampered one near `0.122`. On the original `0.450` full bound those two
+    /// produced roughly 4% and 10%, a separation that never reached a risk
+    /// band. The detector must now put the clean one below CAUTION and the
+    /// overlay clearly above it.
+    #[test]
+    fn a_field_typical_overlay_reaches_caution() {
+        let score_of = |edge_density: f64| {
+            let c = ramp(edge_density, QUIET_ZONE_EDGE_LIMIT, QUIET_ZONE_EDGE_FULL)
+                .powf(SIGNAL_SHARPNESS);
+            combine_components(c, 0.0)
+        };
+
+        let clean = score_of(0.081);
+        let tampered = score_of(0.122);
+
+        assert!(
+            clean < CAUTION_AT,
+            "a clean field capture must stay below CAUTION, got {clean:.3}"
+        );
+        assert!(
+            tampered >= CAUTION_AT,
+            "a field overlay must reach CAUTION, got {tampered:.3}"
+        );
+        assert!(
+            tampered > clean * 3.0,
+            "separation too weak to act on: clean={clean:.3} tampered={tampered:.3}"
+        );
     }
 }

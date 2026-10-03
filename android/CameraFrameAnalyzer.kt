@@ -9,25 +9,23 @@ import java.nio.ByteBuffer
  * CameraX analyzer that forwards frames to the Rust core.
  *
  * This is the Kotlin half of the mobile camera bridge; the Rust half lives in
- * `src-tauri/src/camera/mobile/android.rs`. Together they replace the
- * Camera4Kivy + `analyze_pixels_callback` path the old Kivy app used, which
- * required the analysis to read pixels back out of a UI widget.
+ * `src-tauri/src/camera/mobile/android.rs`.
  *
  * Design notes
  * ------------
- * * **One-shot semantics.** Frames are pushed continuously but the Rust slot
- *   keeps only the newest one. A shutter press then drains it. This matches
- *   the old app's hard-won finding that decoding every frame in a stream
- *   causes hangs; preview stays cheap and analysis happens on demand.
- * * **RGBA, not YUV.** CameraX hands out `YUV_420_888` by default, but the
+ * * One-shot semantics. Frames are pushed continuously but the Rust slot
+ *   keeps only the newest one. A shutter press then drains it. Decoding every
+ *   frame in a stream causes hangs, so preview stays cheap and analysis happens
+ *   on demand.
+ * * RGBA, not YUV. CameraX hands out `YUV_420_888` by default, but the
  *   Rust side expects RGBA8888. The conversion happens here because Kotlin has
  *   the JVM's colour-conversion intrinsics; doing it in Rust would mean
  *   reimplementing YUV->RGB by hand. Sending YUV directly would produce a
  *   wrong-sized buffer, which the Rust side rejects rather than corrupting
  *   memory.
- * * **Direct buffers.** The converted RGBA goes into a direct `ByteBuffer` so
+ * * Direct buffers. The converted RGBA goes into a direct `ByteBuffer` so
  *   the native read needs no extra copy through the JVM heap.
- * * **Failures are logged, not thrown.** This runs on the camera's executor
+ * * Failures are logged, not thrown. This runs on the camera's executor
  *   for every frame; an exception here would kill the analysis pipeline.
  */
 class CameraFrameAnalyzer(
@@ -40,7 +38,7 @@ class CameraFrameAnalyzer(
      * Declared as a named interface rather than a bare function type: Kotlin
      * cannot infer parameter types for a lambda passed to a constructor, and
      * spelling them out inline is noisy and easy to get wrong. A named
-     * interface makes the contract explicit and self-documenting.
+     * interface makes the contract explicit.
      */
     interface FrameSink {
         /**

@@ -18,9 +18,9 @@ export interface Layer1Result {
   spatial_edge_density: number;
   temporal_glare_var: number;
   /**
-   * Peak local texture variance. Reported for calibration but deliberately given
-   * no weight in the score: it saturates on any readable QR, so it cannot
-   * discriminate a tampered symbol from a clean one.
+   * Peak local texture variance. Reported for calibration but given no weight
+   * in the score: it saturates on any readable QR, so it cannot discriminate a
+   * tampered symbol from a clean one.
    */
   texture_discontinuity: number;
   /** Share of the detection ring covered by specular glare. */
@@ -38,6 +38,8 @@ export interface Layer2Result {
   mcc: string;
   merchant_name: string;
   merchant_city: string;
+  /** National Merchant ID (NMID) from the merchant account sub-TLVs, if present. */
+  merchant_id: string;
   parsed_tlv: Record<string, unknown>;
   warnings: string[];
 }
@@ -97,6 +99,16 @@ export interface ScanSnapshot {
   raw_qris_str: string;
   /** Set when no QR was read; explains what the user should do next. */
   no_qr_reason: string | null;
+  /**
+   * Whether this snapshot carries a result worth showing at all.
+   *
+   * `false` for a failed read: no symbol found, a frame too blurry to decode,
+   * or a camera error. When `false`, the UI must show only `error_reason` and
+   * must never render a score.
+   */
+  scannable: boolean;
+  /** Short, non-technical reason no result is available; `null` when scannable. */
+  error_reason: string | null;
   coverage: ScanCoverage;
   findings: Finding[];
   chain_hash: number | null;
@@ -111,6 +123,9 @@ export interface HistoryEntry {
   source: string;
   combined_score: number;
   combined_risk_level: string;
+  /** Merchant name from Tag 59, so history is readable without decoding a payload. */
+  merchant_name: string;
+  merchant_city: string;
   payload_preview: string;
   l1_score: number;
   l2_score: number;
@@ -138,9 +153,9 @@ export interface CameraDiagnostics {
 /**
  * One preview frame, already JPEG-encoded as a data URL.
  *
- * Raw pixels deliberately do not cross the IPC boundary: a 640x480 frame is
- * ~900 KB which becomes several MB as JSON, per frame. The Rust side downscales
- * and JPEG-encodes to roughly 40-80 KB, which is what makes a live preview
+ * Raw pixels do not cross the IPC boundary: a 640x480 frame is ~900 KB which
+ * becomes several MB as JSON, per frame. The Rust side downscales and
+ * JPEG-encodes to roughly 40-80 KB, which is what makes a live preview
  * affordable.
  */
 export interface PreviewFrame {

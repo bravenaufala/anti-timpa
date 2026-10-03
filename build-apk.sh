@@ -83,10 +83,10 @@ npx tauri android build --apk --target aarch64 --features geolocation
 [ -f "$UNSIGNED_APK" ] || fail "APK tidak dihasilkan di $UNSIGNED_APK"
 
 # --- Verify JNI symbols survived --------------------------------------------
-# This is the check that matters most. Release builds enable LTO and
-# `strip = true`, which removes the JNI entry points unless build.rs passes
-# -Wl,--undefined for each one. The app then runs until the first camera call
-# and dies with UnsatisfiedLinkError — a failure that never appears in debug.
+# Release builds enable LTO and `strip = true`, which removes the JNI entry
+# points unless build.rs passes -Wl,--undefined for each one. The app then runs
+# until the first camera call and dies with UnsatisfiedLinkError, a failure that
+# never appears in debug.
 info "Memverifikasi simbol JNI masih ada di .so release..."
 
 VERIFY_DIR="$(mktemp -d)"
@@ -152,9 +152,9 @@ if [ "${1:-}" = "--install" ]; then
   # permission dialog during verification. A real user would see the prompt.
   "$ADB" shell pm grant org.antitimpa.antitimpa android.permission.CAMERA 2>/dev/null || true
 
-  # Location is deliberately NOT pre-granted. The whole point of Layer 3 asking
-  # at scan time is that the user makes an informed choice, and auto-granting
-  # during a test install would hide whether the permission prompt actually works.
+  # Location is not pre-granted. Layer 3 asks at scan time so the user makes an
+  # informed choice; auto-granting during a test install would hide whether the
+  # permission prompt actually works.
   info "Izin lokasi sengaja tidak di-grant otomatis — uji prompt manualnya."
 
   info "Terpasang. Untuk melihat log kamera:"

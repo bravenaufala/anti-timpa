@@ -1,4 +1,4 @@
-//! Anti Timpa QRIS Scanner — Tauri backend.
+//! Anti Timpa QRIS Scanner: Tauri backend.
 //!
 //! This is the Rust core that React talks to over Tauri IPC. It currently
 //! implements the payload-only layers (Layer 2 EMVCo + Layer 3 geofence),
@@ -15,7 +15,7 @@ pub mod layer1_optical;
 pub mod layer2_emvco;
 pub mod layer3_geofence;
 pub mod qr;
-pub mod report;
+pub mod sdk;
 
 use camera::{CameraBackend, Frame};
 use layer1_optical::Layer1Result;
@@ -25,10 +25,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
+use tauri::Manager;
 
-/// Combined scan snapshot, mirroring the shape produced by
-/// `scanner_core.py::QrisScannerCore::snapshot()` so the React UI can render
-/// the same fields as the KivyMD app.
+/// Combined scan snapshot consumed by the React UI.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanSnapshot {
     pub l1: Value,
@@ -44,11 +43,23 @@ pub struct ScanSnapshot {
     /// `None` when a payload was successfully analysed.
     #[serde(default)]
     pub no_qr_reason: Option<String>,
+    /// Whether this snapshot carries a result worth showing at all.
+    ///
+    /// `false` for a failed read: no symbol found, a frame too blurry to
+    /// decode, or a capture error. When it is `false` the UI must show only
+    /// `error_reason` and must never render a score, because a score computed
+    /// from an unread payload would be invented.
+    #[serde(default)]
+    pub scannable: bool,
+    /// Short, non-technical explanation of why no result is available.
+    /// `None` exactly when `scannable` is `true`.
+    #[serde(default)]
+    pub error_reason: Option<String>,
     /// Whether the result reflects a complete check or a partial one.
     ///
-    /// This is the field that stops a payload-only scan from being presented as
-    /// "safe": a tampered sticker leaves the payload untouched, so a result that
-    /// never ran the optical layer must not be read as reassurance.
+    /// A payload-only scan must not be presented as "safe": a tampered sticker
+    /// leaves the payload untouched, so a result that never ran the optical
+    /// layer must not be read as reassurance.
     #[serde(default)]
     pub coverage: ScanCoverage,
     /// Actionable findings, worst first, ready for the UI to list.
@@ -86,7 +97,7 @@ impl Default for ScanCoverage {
 /// A single named risk rule that fired.
 ///
 /// Rules are named so a finding can be cited consistently across the UI, the
-/// history timeline, and a shared report — an anonymous "score 0.8" is not
+/// history timeline, and a shared report. An anonymous "score 0.8" is not
 /// actionable to a merchant or a bank.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Finding {
@@ -120,7 +131,7 @@ impl Finding {
 /// Classifies a combined score into a risk band.
 ///
 /// The CRC failure case is a hard veto and is handled by the caller setting
-/// `combined_score = 1.0`, matching `scanner_core.py`.
+/// `combined_score = 1.0`.
 fn risk_band(score: f64, crc_valid: bool) -> &'static str {
     if !crc_valid {
         "HIGH RISK"
@@ -145,16 +156,31 @@ fn layer1_placeholder(reason: &str) -> Value {
 
 /// Analyses a raw QRIS payload string through Layer 2 and Layer 3.
 ///
-/// This path has **no frame**, so Layer 1 cannot run. That is recorded as an
+/// This path has no frame, so Layer 1 cannot run. That is recorded as an
 /// explicit `NOT RUN` coverage flag rather than an implicit zero, because a
 /// payload-only scan cannot detect a physical overlay: the payload of a pasted
 /// sticker is byte-identical to the original.
 ///
-/// * `payload`     — the decoded EMVCo string.
-/// * `optical_type`— `"physical_camera_scan"` or `"imported_image"`.
-/// * `client_city` — city from GPS reverse geocoding, when available.
+/// * `payload`: the decoded EMVCo string.
+/// * `optical_type`: `"physical_camera_scan"` or `"imported_image"`.
+/// * `client_city`: city from GPS reverse geocoding, when available.
 #[tauri::command]
 fn analyze_payload(
+    payload: String,
+    optical_type: Option<String>,
+    client_city: Option<String>,
+    client_lat: Option<f64>,
+    client_lon: Option<f64>,
+) -> ScanSnapshot {
+    analyze_payload_snapshot(payload, optical_type, client_city, client_lat, client_lon)
+}
+
+/// The analyzer behind [`analyze_payload`], callable without a Tauri runtime.
+///
+/// Extracted so the same core can be reached from the C-ABI surface in
+/// [`sdk`], which is what a bank/PSP integration would embed. Keeping one
+/// implementation means the app and any host SDK can never drift apart.
+pub fn analyze_payload_snapshot(
     payload: String,
     optical_type: Option<String>,
     client_city: Option<String>,
@@ -246,6 +272,20 @@ fn analyze_with(
 
     let findings = build_findings(&l1, &l2, &l3, combined_score, l2.crc_valid);
 
+    // A payload-only analysis carries a real result: Layer 2 and Layer 3 both
+    // ran. `scannable` is set here rather than by the caller so no path can
+    // forget it and end up rendering a score without a payload.
+    let scannable = !payload.is_empty();
+
+    // With no payload there is nothing to score. The layers still report what
+    // they saw (a failed CRC among them), but the combined verdict is cleared so
+    // no caller can read "HIGH RISK" off a scan that read no QR at all.
+    let (combined_score, combined_risk_level) = if scannable {
+        (combined_score, combined_risk_level)
+    } else {
+        (0.0, "NO QR".to_string())
+    };
+
     ScanSnapshot {
         l1,
         l2: serde_json::to_value(&l2).unwrap_or(Value::Null),
@@ -256,7 +296,17 @@ fn analyze_with(
         blur_var: 0.0,
         qr_bbox: None,
         raw_qris_str: payload,
-        no_qr_reason: None,
+        no_qr_reason: if scannable {
+            None
+        } else {
+            Some("Tidak ada payload QRIS untuk dianalisis.".to_string())
+        },
+        scannable,
+        error_reason: if scannable {
+            None
+        } else {
+            Some("Tidak ada kode QRIS yang bisa dibaca.".to_string())
+        },
         coverage,
         findings,
         chain_hash: None,
@@ -387,8 +437,8 @@ fn build_findings(
         }
     }
 
-    // A clean result is itself a finding worth stating — with its scope made
-    // explicit, so "nothing found" is never mistaken for "everything checked".
+    // A clean result is itself a finding worth stating, with its scope made
+    // explicit so "nothing found" is never mistaken for "everything checked".
     if out.is_empty() && crc_valid && combined_score == 0.0 {
         out.push(Finding::new(
             "NO_FINDINGS",
@@ -525,9 +575,9 @@ fn camera_diagnostics(
 
 /// Captures one frame and returns its dimensions plus a blur metric.
 ///
-/// The full pixel buffer is deliberately NOT returned over IPC — a 640x480
-/// frame is ~900 KB as JSON, which would be a serious bottleneck for the
-/// live path. Only metadata crosses the boundary; analysis runs in Rust.
+/// The full pixel buffer is not returned over IPC: a 640x480 frame is ~900 KB
+/// as JSON, which would be a serious bottleneck for the live path. Only
+/// metadata crosses the boundary; analysis runs in Rust.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CaptureResult {
     pub width: u32,
@@ -554,11 +604,11 @@ pub struct PreviewFrame {
 
 /// Grabs one frame and returns it as a downscaled JPEG data URL.
 ///
-/// Separate from `capture_frame` and `capture_and_analyze` for a reason: the
-/// preview loop runs continuously, while analysis is user-triggered. Sharing a
-/// command would make the analysis wait behind preview traffic, and vice versa.
+/// Separate from `capture_frame` and `capture_and_analyze`: the preview loop
+/// runs continuously, while analysis is user-triggered. Sharing a command would
+/// make the analysis wait behind preview traffic, and vice versa.
 ///
-/// Errors are returned as `Err` but the UI should treat them as non-fatal — a
+/// Errors are returned as `Err` but the UI should treat them as non-fatal: a
 /// dropped preview frame while the user is still positioning the camera is
 /// normal, not a failure to report.
 #[tauri::command]
@@ -610,7 +660,7 @@ fn camera_preview(
 ///
 /// A scope guard rather than manual bookkeeping: `capture_and_analyze` has
 /// several early-return paths (lock poisoning, capture failure, decode
-/// failure), and forgetting one would leave preview permanently paused — a bug
+/// failure), and forgetting one would leave preview permanently paused, a bug
 /// that would look like "preview silently stopped working".
 struct AnalysisGuard<'a>(&'a AtomicBool);
 
@@ -672,6 +722,14 @@ fn capture_frame(state: tauri::State<'_, CameraState>) -> Result<CaptureResult, 
 /// Burst capture is best-effort: if the device only delivers one frame, the
 /// scan proceeds and Layer 1 reports that its temporal term was skipped, instead
 /// of failing the whole capture.
+///
+/// A capture that could not produce a readable QR is not an `Err`.
+///
+/// It returns a snapshot with `scannable = false` and an `error_reason`
+/// describing the failure, because the caller's job is then to show the reason
+/// instead of a result. Collapsing every failure into one opaque error string
+/// would make "the camera is broken" indistinguishable from "the frame was
+/// blurry" or "no QR was in view".
 #[tauri::command]
 fn capture_and_analyze(
     state: tauri::State<'_, CameraState>,
@@ -731,7 +789,7 @@ fn capture_and_analyze(
     if frames.is_empty() {
         let msg = last_error.unwrap_or_else(|| "tidak ada frame yang berhasil diambil".to_string());
         camera::log::cam_error(&format!("capture gagal total: {msg}"));
-        return Err(msg);
+        return Ok(failed_snapshot(capture_failed_reason(&msg)));
     }
 
     let primary = &frames[0];
@@ -742,13 +800,20 @@ fn capture_and_analyze(
         frames.len()
     ));
 
-    // Decode the QR. A blurry frame is still decoded: the old app's blur gate
-    // only gated the *temporal* FIFO, and refusing to decode here would make a
+    // Decode the QR. A blurry frame is still decoded: the blur gate only
+    // gates the *temporal* FIFO, and refusing to decode here would make a
     // slightly soft but perfectly readable QR look like a failure.
-    let hit = qr::decode(primary).map_err(|e| {
-        camera::log::cam_error(&format!("decode QR gagal: {e}"));
-        format!("decode gagal: {e}")
-    })?;
+    let hit = match qr::decode(primary) {
+        Ok(hit) => hit,
+        Err(e) => {
+            // A decoder fault is not the user's fault, so it is reported as a
+            // failed scan with a reason rather than bubbled up as an error.
+            camera::log::cam_error(&format!("decode QR gagal: {e}"));
+            return Ok(failed_snapshot(format!(
+                "Gambar dari kamera tidak bisa dibaca ({e}). Coba ambil ulang."
+            )));
+        }
+    };
 
     match &hit {
         Some(h) => camera::log::cam_info(&format!(
@@ -761,30 +826,45 @@ fn capture_and_analyze(
         ),
     }
 
+    // No symbol means there is nothing to score. Return early with a reason and
+    // no result, so the UI cannot render a gauge for a scan that found nothing.
+    if hit.is_none() {
+        let reason = if is_blurry {
+            "Kamera tidak fokus — gambar terlalu blur. Tahan kamera lebih tenang \
+             lalu coba lagi."
+        } else {
+            "Tidak ada kode QRIS yang terbaca. Arahkan kamera tepat ke kode QRIS \
+             dan pastikan pencahayaan cukup."
+        };
+        let mut snapshot = failed_snapshot(reason.to_string());
+        snapshot.blur_var = blur_var;
+        snapshot.is_blurry = is_blurry;
+        return Ok(snapshot);
+    }
+
+    let hit = hit.expect("checked above");
+
     // Layer 1 runs only when there is a symbol to measure. Without a bbox there
-    // is no quiet zone, and reporting a score anyway would be exactly the
+    // is no quiet zone, and reporting a score anyway would be the
     // false-clean result this layer exists to prevent.
-    let l1 = match &hit {
-        Some(h) => {
-            let bbox = (
-                h.bbox[0] as u32,
-                h.bbox[1] as u32,
-                h.bbox[2] as u32,
-                h.bbox[3] as u32,
-            );
-            let r = layer1_optical::analyze_burst(&frames, bbox);
-            camera::log::cam_info(&format!(
-                "Layer 1: band={} skor={:.3} edge={:.4} glare={:.4} temporal_var={:.6} bbox={:?}",
-                r.risk_level,
-                r.l1_score,
-                r.spatial_edge_density,
-                r.glare_fraction,
-                r.temporal_glare_var,
-                bbox
-            ));
-            serde_json::to_value(&r).unwrap_or(Value::Null)
-        }
-        None => layer1_placeholder("tidak ada QR yang terbaca pada burst ini"),
+    let l1 = {
+        let bbox = (
+            hit.bbox[0] as u32,
+            hit.bbox[1] as u32,
+            hit.bbox[2] as u32,
+            hit.bbox[3] as u32,
+        );
+        let r = layer1_optical::analyze_burst(&frames, bbox);
+        camera::log::cam_info(&format!(
+            "Layer 1: band={} skor={:.3} edge={:.4} glare={:.4} temporal_var={:.6} bbox={:?}",
+            r.risk_level,
+            r.l1_score,
+            r.spatial_edge_density,
+            r.glare_fraction,
+            r.temporal_glare_var,
+            bbox
+        ));
+        serde_json::to_value(&r).unwrap_or(Value::Null)
     };
 
     let client_fix = match (client_lat, client_lon) {
@@ -792,44 +872,125 @@ fn capture_and_analyze(
         _ => None,
     };
 
-    let mut snapshot = match &hit {
-        Some(h) => analyze_with(
-            h.payload.clone(),
-            optical_type.clone(),
-            client_city.clone(),
-            l1,
-            client_fix,
-        ),
-        None => analyze_with(
-            String::new(),
-            optical_type,
-            client_city,
-            l1,
-            client_fix,
-        ),
-    };
+    let mut snapshot = analyze_with(
+        hit.payload.clone(),
+        optical_type,
+        client_city,
+        l1,
+        client_fix,
+    );
+
+    // A decoded symbol is not automatically usable: a payload that Layer 2
+    // rejects as structurally invalid carries no merchant data and no value, so
+    // it is reported as a failed read rather than a result.
+    let payload_readable = snapshot
+        .l2
+        .get("crc_valid")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !payload_readable {
+        camera::log::cam_warn("QR terbaca tetapi isinya bukan QRIS yang valid");
+        let mut snapshot = failed_snapshot(
+            "Kode terbaca, tetapi isinya bukan QRIS yang valid (struktur atau \
+             checksum gagal). Pastikan yang dipindai benar-benar kode QRIS."
+                .to_string(),
+        );
+        snapshot.blur_var = blur_var;
+        snapshot.is_blurry = is_blurry;
+        snapshot.qr_bbox = Some([
+            hit.bbox[0] as i32,
+            hit.bbox[1] as i32,
+            hit.bbox[2] as i32,
+            hit.bbox[3] as i32,
+        ]);
+        return Ok(snapshot);
+    }
 
     snapshot.blur_var = blur_var;
     snapshot.is_blurry = is_blurry;
-    snapshot.qr_bbox = hit.as_ref().map(|h| {
-        [
-            h.bbox[0] as i32,
-            h.bbox[1] as i32,
-            h.bbox[2] as i32,
-            h.bbox[3] as i32,
-        ]
-    });
-    snapshot.no_qr_reason = if hit.is_none() {
-        Some(if is_blurry {
-            "Frame terlalu blur — tahan kamera lebih tenang.".to_string()
-        } else {
-            "Tidak ada QR terbaca — arahkan kamera lebih dekat.".to_string()
-        })
-    } else {
-        None
-    };
+    snapshot.qr_bbox = Some([
+        hit.bbox[0] as i32,
+        hit.bbox[1] as i32,
+        hit.bbox[2] as i32,
+        hit.bbox[3] as i32,
+    ]);
 
     Ok(snapshot)
+}
+
+/// The empty, non-scannable snapshot every failed read returns.
+///
+/// One constructor so a failure path cannot accidentally leave a real score in
+/// place: the UI keys off `scannable`, and a stale `combined_score` from a
+/// previous scan would be rendered as this scan's verdict.
+fn failed_snapshot(reason: String) -> ScanSnapshot {
+    ScanSnapshot {
+        l1: layer1_placeholder("tidak ada QR yang terbaca"),
+        l2: serde_json::to_value(layer2_emvco::Layer2Result {
+            l2_score: 0.0,
+            crc_valid: false,
+            initiation_mode: String::new(),
+            mcc: String::new(),
+            merchant_name: String::new(),
+            merchant_city: String::new(),
+            merchant_id: String::new(),
+            parsed_tlv: Value::Null,
+            warnings: Vec::new(),
+        })
+        .unwrap_or(Value::Null),
+        l3: serde_json::to_value(layer3_geofence::GeofenceResult {
+            l3_score: 0.0,
+            risk_level: "NO QR".to_string(),
+            warnings: Vec::new(),
+            client_city: None,
+            merchant_city: None,
+            mismatch_kind: "NOT_EVALUATED".to_string(),
+            distance_km: None,
+            location_available: false,
+            evaluated: false,
+        })
+        .unwrap_or(Value::Null),
+        combined_score: 0.0,
+        combined_risk_level: "NO QR".to_string(),
+        is_blurry: false,
+        blur_var: 0.0,
+        qr_bbox: None,
+        raw_qris_str: String::new(),
+        no_qr_reason: Some(reason.clone()),
+        scannable: false,
+        error_reason: Some(reason),
+        coverage: ScanCoverage::default(),
+        findings: Vec::new(),
+        chain_hash: None,
+    }
+}
+
+/// Turns a raw camera error into something a user can act on.
+///
+/// The original message is technical (device paths, driver strings), so it is
+/// mapped to a plain sentence first and only shown verbatim in technical mode.
+fn capture_failed_reason(raw: &str) -> String {
+    let lowered = raw.to_lowercase();
+    let hint = if lowered.contains("permission")
+        || lowered.contains("izin")
+        || lowered.contains("denied")
+    {
+        "Izin kamera ditolak. Berikan izin kamera untuk aplikasi ini, lalu coba lagi."
+    } else if lowered.contains("busy")
+        || lowered.contains("already")
+        || lowered.contains("digunakan")
+    {
+        "Kamera sedang dipakai aplikasi lain. Tutup aplikasi tersebut lalu coba lagi."
+    } else if lowered.contains("open")
+        || lowered.contains("not found")
+        || lowered.contains("no such")
+        || lowered.contains("tidak ditemukan")
+    {
+        "Kamera tidak terdeteksi. Pastikan perangkat punya kamera dan tidak dinonaktifkan."
+    } else {
+        "Kamera gagal mengambil gambar. Coba lagi sebentar lagi."
+    };
+    format!("{hint} ({raw})")
 }
 
 /// Frames requested for the optical burst by default.
@@ -853,8 +1014,7 @@ fn release_camera(state: tauri::State<'_, CameraState>) -> Result<(), String> {
     Ok(())
 }
 
-/// Laplacian variance sharpness metric, matching
-/// `QrisScannerCore._compute_blur` (lower = blurrier).
+/// Laplacian variance sharpness metric (lower = blurrier).
 fn laplacian_variance(frame: &Frame) -> f64 {
     let gray = frame.to_gray();
     let (w, h) = (frame.width as i64, frame.height as i64);
@@ -862,7 +1022,7 @@ fn laplacian_variance(frame: &Frame) -> f64 {
         return 0.0;
     }
 
-    // Discrete Laplacian with the same 3x3 kernel OpenCV uses by default:
+    // Discrete Laplacian with the standard 3x3 kernel:
     //   [0  1  0]
     //   [1 -4  1]
     //   [0  1  0]
@@ -916,50 +1076,88 @@ fn analyze_image_bytes(
         imported.info.downscaled
     ));
 
-    let hit = qr::decode(&frame).map_err(|e| format!("decode gagal: {e}"))?;
-
-    let (l1, payload) = match &hit {
-        Some(h) => {
-            let bbox = (
-                h.bbox[0] as u32,
-                h.bbox[1] as u32,
-                h.bbox[2] as u32,
-                h.bbox[3] as u32,
-            );
-            let r = layer1_optical::analyze_burst(std::slice::from_ref(&frame), bbox);
-            camera::log::cam_info(&format!(
-                "Layer 1 (impor): band={} skor={:.3} edge={:.4} bbox={:?}",
-                r.risk_level, r.l1_score, r.spatial_edge_density, bbox
-            ));
-            (serde_json::to_value(&r).unwrap_or(Value::Null), h.payload.clone())
+    let hit = match qr::decode(&frame) {
+        Ok(hit) => hit,
+        Err(e) => {
+            camera::log::cam_error(&format!("decode gambar impor gagal: {e}"));
+            return Ok(failed_snapshot(format!(
+                "Gambar tidak bisa dibaca ({e}). Coba berkas lain."
+            )));
         }
-        None => (
-            layer1_placeholder("tidak ada QR yang terbaca pada gambar yang diimpor"),
-            String::new(),
-        ),
     };
+
+    // Same rule as the camera path: no symbol means no result, only a reason.
+    if hit.is_none() {
+        let mut snapshot = failed_snapshot(
+            "Tidak ada kode QRIS yang terbaca pada gambar ini. Pastikan QR terlihat \
+             utuh, tidak terpotong, dan pencahayaan cukup."
+                .to_string(),
+        );
+        snapshot.blur_var = laplacian_variance(&frame);
+        snapshot.is_blurry = snapshot.blur_var < DEFAULT_BLUR_THRESHOLD;
+        return Ok(snapshot);
+    }
+
+    let hit = hit.expect("checked above");
+
+    let bbox = (
+        hit.bbox[0] as u32,
+        hit.bbox[1] as u32,
+        hit.bbox[2] as u32,
+        hit.bbox[3] as u32,
+    );
+    let l1_result = layer1_optical::analyze_burst(std::slice::from_ref(&frame), bbox);
+    camera::log::cam_info(&format!(
+        "Layer 1 (impor): band={} skor={:.3} edge={:.4} bbox={:?}",
+        l1_result.risk_level, l1_result.l1_score, l1_result.spatial_edge_density, bbox
+    ));
+    let l1 = serde_json::to_value(&l1_result).unwrap_or(Value::Null);
 
     let client_fix = match (client_lat, client_lon) {
         (Some(la), Some(lo)) => Some((la, lo)),
         _ => None,
     };
 
-    let mut snapshot = analyze_with(payload, optical_type, client_city, l1, client_fix);
+    let mut snapshot = analyze_with(
+        hit.payload.clone(),
+        optical_type,
+        client_city,
+        l1,
+        client_fix,
+    );
+
+    // An imported file that does not hold a valid QRIS payload must not be
+    // presented as a scored result, for the same reason as the camera path.
+    let payload_readable = snapshot
+        .l2
+        .get("crc_valid")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !payload_readable {
+        let mut failed = failed_snapshot(
+            "Kode terbaca pada gambar, tetapi isinya bukan QRIS yang valid. \
+             Pastikan gambar berisi kode QRIS asli."
+                .to_string(),
+        );
+        failed.qr_bbox = Some([
+            hit.bbox[0] as i32,
+            hit.bbox[1] as i32,
+            hit.bbox[2] as i32,
+            hit.bbox[3] as i32,
+        ]);
+        failed.blur_var = laplacian_variance(&frame);
+        failed.is_blurry = failed.blur_var < DEFAULT_BLUR_THRESHOLD;
+        return Ok(failed);
+    }
 
     snapshot.blur_var = laplacian_variance(&frame);
     snapshot.is_blurry = snapshot.blur_var < DEFAULT_BLUR_THRESHOLD;
-    snapshot.qr_bbox = hit
-        .as_ref()
-        .map(|h| [h.bbox[0] as i32, h.bbox[1] as i32, h.bbox[2] as i32, h.bbox[3] as i32]);
-    snapshot.no_qr_reason = if hit.is_none() {
-        Some(
-            "Tidak ada QR terbaca pada gambar. Pastikan QR terlihat utuh, tidak terpotong, \
-             dan pencahayaan cukup."
-                .to_string(),
-        )
-    } else {
-        None
-    };
+    snapshot.qr_bbox = Some([
+        hit.bbox[0] as i32,
+        hit.bbox[1] as i32,
+        hit.bbox[2] as i32,
+        hit.bbox[3] as i32,
+    ]);
 
     Ok(snapshot)
 }
@@ -970,7 +1168,8 @@ fn inspect_image(bytes: Vec<u8>) -> Result<image_import::ImportInfo, String> {
     Ok(image_import::load_from_bytes(&bytes)?.info)
 }
 
-/// Matches `blur_threshold=100.0` from `QrisScannerCore`'s default.
+/// Default blur threshold: frames whose Laplacian variance falls below this
+/// are treated as blurry.
 const DEFAULT_BLUR_THRESHOLD: f64 = 100.0;
 
 // ---------------------------------------------------------------------------
@@ -979,9 +1178,9 @@ const DEFAULT_BLUR_THRESHOLD: f64 = 100.0;
 
 /// Resolves a typed city name to coordinates from the bundled offline table.
 ///
-/// This is the desktop answer to location. Desktop has no OS location service —
-/// `navigator.geolocation` inside a WebView is either denied or fabricated, and
-/// the Tauri geolocation plugin is mobile-only — so rather than failing the
+/// This is the desktop answer to location. Desktop has no OS location service
+/// (`navigator.geolocation` inside a WebView is either denied or fabricated,
+/// and the Tauri geolocation plugin is mobile-only), so rather than failing the
 /// comparison, Layer 3 can resolve the city the user typed.
 ///
 /// Returns `None` for an unknown city. That is not an error: the caller then
@@ -1005,21 +1204,61 @@ fn known_cities() -> Vec<String> {
 // Scan history
 // ---------------------------------------------------------------------------
 
-/// Session-scoped history, owned for the app's lifetime.
+/// Locally persisted scan history, owned for the app's lifetime.
 ///
-/// Deliberately in-memory: persisting a log of everything a user scanned is a
-/// privacy decision the user should make, not a default. See
-/// `docs/ARCHITECTURE.md` for the persistence roadmap.
-#[derive(Default)]
+/// Backed by a JSON file in the app data directory so the scan list survives a
+/// restart, which makes it a usable "riwayat pemindaian" rather than a session
+/// scratchpad. The file never leaves the device.
 pub struct HistoryState {
     chain: Mutex<history::HistoryChain>,
+    /// `None` when the platform gave us no usable data directory; the history
+    /// then works in memory exactly as before.
+    path: Option<std::path::PathBuf>,
+}
+
+impl HistoryState {
+    /// File name for the local history store.
+    const FILE: &'static str = "scan_history.json";
+
+    /// Loads a previously saved history from `dir`, if any.
+    pub fn load(dir: Option<std::path::PathBuf>) -> Self {
+        let path = dir.map(|d| d.join(Self::FILE));
+        let chain = path
+            .as_ref()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .map(|raw| history::HistoryChain::from_json(&raw))
+            .unwrap_or_default();
+        Self {
+            chain: Mutex::new(chain),
+            path,
+        }
+    }
+
+    /// Writes the current chain to disk, best-effort.
+    ///
+    /// A failed write is logged but never surfaced as an error: losing the
+    /// on-disk copy must not lose the scan the user just took, which is already
+    /// in memory and visible in the UI.
+    fn persist(&self, chain: &history::HistoryChain) {
+        let Some(path) = &self.path else { return };
+        if let Some(parent) = path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                crate::camera::log::cam_warn(&format!("riwayat: gagal membuat folder: {e}"));
+                return;
+            }
+        }
+        if let Err(e) = std::fs::write(path, chain.to_json()) {
+            crate::camera::log::cam_warn(&format!("riwayat: gagal menyimpan ke disk: {e}"));
+        }
+    }
 }
 
 /// Records a completed scan into the tamper-evident chain.
 ///
-/// Called by the UI *after* a scan the user chose to keep, not automatically on
-/// every capture — a history the user did not ask for is surveillance, and on a
-/// phone it is also battery and storage spent on noise.
+/// Called automatically by the UI for every scan that produced a result, so the
+/// user has a saved history to browse. Scans with no result
+/// (`scannable == false`) are refused here rather than filtered in the UI, so a
+/// failed read can never end up as a row in the history.
 #[tauri::command]
 fn record_scan(
     state: tauri::State<'_, HistoryState>,
@@ -1027,6 +1266,10 @@ fn record_scan(
     source: String,
     timestamp_ms: Option<u64>,
 ) -> Result<history::HistoryEntry, String> {
+    if !snapshot.scannable {
+        return Err("pemindaian tanpa hasil tidak disimpan ke riwayat".to_string());
+    }
+
     let l2 = &snapshot.l2;
     let crc_valid = l2.get("crc_valid").and_then(|v| v.as_bool()).unwrap_or(false);
     let payload_preview = snapshot.raw_qris_str.clone();
@@ -1038,6 +1281,16 @@ fn record_scan(
         source,
         combined_score: snapshot.combined_score,
         combined_risk_level: snapshot.combined_risk_level.clone(),
+        merchant_name: l2
+            .get("merchant_name")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        merchant_city: l2
+            .get("merchant_city")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
         payload: payload_preview,
         l1_score: snapshot.l1.get("l1_score").and_then(|v| v.as_f64()).unwrap_or(0.0),
         l2_score: l2.get("l2_score").and_then(|v| v.as_f64()).unwrap_or(0.0),
@@ -1050,7 +1303,9 @@ fn record_scan(
         .chain
         .lock()
         .map_err(|_| "kunci riwayat rusak (poisoned)".to_string())?;
-    Ok(chain.push(input))
+    let entry = chain.push(input);
+    state.persist(&chain);
+    Ok(entry)
 }
 
 /// Returns the recorded scans, newest first.
@@ -1086,50 +1341,15 @@ fn history_clear(state: tauri::State<'_, HistoryState>) -> Result<(), String> {
         .lock()
         .map_err(|_| "kunci riwayat rusak (poisoned)".to_string())?;
     chain.clear();
+    state.persist(&chain);
     Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Shareable report
-// ---------------------------------------------------------------------------
-
-/// Renders a scan as a text or HTML document.
-///
-/// Generated entirely on-device and returned as a string: the app never uploads
-/// a report, so the "no data leaves the device" guarantee holds even for the
-/// feature whose whole purpose is sharing a finding.
-#[tauri::command]
-fn generate_report(
-    state: tauri::State<'_, HistoryState>,
-    snapshot: ScanSnapshot,
-    source: String,
-    format: Option<String>,
-    timestamp_ms: Option<u64>,
-) -> Result<String, String> {
-    let chain_hash = state
-        .chain
-        .lock()
-        .ok()
-        .and_then(|c| c.entries().last().map(|e| e.entry_hash));
-
-    let fmt = report::ReportFormat::parse(format.as_deref().unwrap_or("text"));
-    Ok(report::render(
-        &report::ReportInput {
-            snapshot: &snapshot,
-            source: &source,
-            timestamp_ms,
-            app_version: env!("CARGO_PKG_VERSION"),
-            chain_hash,
-        },
-        fmt,
-    ))
 }
 
 /// Analyses a payload together with an optional image, without a camera.
 ///
 /// This is the `imported_image` path: the frame arrives as raw RGB over IPC so
 /// Layer 1 can run on it. The bbox is required for the same reason it is on the
-/// camera path — without a symbol boundary there is no quiet zone to measure.
+/// camera path: without a symbol boundary there is no quiet zone to measure.
 #[tauri::command]
 fn analyze_image_frame(
     rgb: Vec<u8>,
@@ -1143,33 +1363,39 @@ fn analyze_image_frame(
 ) -> Result<ScanSnapshot, String> {
     let frame = Frame::new(width, height, rgb).map_err(|e| e.to_string())?;
 
-    let hit = qr::decode(&frame).map_err(|e| format!("decode gagal: {e}"))?;
+    let hit = match qr::decode(&frame) {
+        Ok(hit) => hit,
+        Err(e) => return Ok(failed_snapshot(format!("Gambar tidak bisa dibaca ({e})."))),
+    };
 
     let effective_bbox = bbox.map(|b| (b[0], b[1], b[2], b[3])).or_else(|| {
         hit.as_ref()
             .map(|h| (h.bbox[0] as u32, h.bbox[1] as u32, h.bbox[2] as u32, h.bbox[3] as u32))
     });
 
+    // No symbol, no result: same rule as the camera path.
+    let Some(hit) = hit else {
+        let mut snapshot = failed_snapshot(
+            "Tidak ada kode QRIS yang terbaca pada gambar ini. Pastikan QR terlihat \
+             utuh, tidak terpotong, dan pencahayaan cukup."
+                .to_string(),
+        );
+        snapshot.blur_var = laplacian_variance(&frame);
+        snapshot.is_blurry = snapshot.blur_var < DEFAULT_BLUR_THRESHOLD;
+        return Ok(snapshot);
+    };
+
     // Layer 1 needs the frame, and the blur metric below needs it too, so the
     // single-frame analysis takes a borrow rather than consuming the buffer.
-    let (l1, payload) = match (&hit, effective_bbox) {
-        (Some(h), Some(b)) => (
-            serde_json::to_value(layer1_optical::analyze_burst(
-                std::slice::from_ref(&frame),
-                b,
-            ))
-            .unwrap_or(Value::Null),
-            h.payload.clone(),
-        ),
-        (Some(h), None) => (
-            layer1_placeholder("bbox QR tidak tersedia"),
-            h.payload.clone(),
-        ),
-        (None, _) => (
-            layer1_placeholder("tidak ada QR yang terbaca pada gambar"),
-            String::new(),
-        ),
+    let l1 = match effective_bbox {
+        Some(b) => serde_json::to_value(layer1_optical::analyze_burst(
+            std::slice::from_ref(&frame),
+            b,
+        ))
+        .unwrap_or(Value::Null),
+        None => layer1_placeholder("bbox QR tidak tersedia"),
     };
+    let payload = hit.payload.clone();
 
     let client_fix = match (client_lat, client_lon) {
         (Some(la), Some(lo)) => Some((la, lo)),
@@ -1183,6 +1409,23 @@ fn analyze_image_frame(
         client_fix,
     );
 
+    let payload_readable = snapshot
+        .l2
+        .get("crc_valid")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !payload_readable {
+        let mut failed = failed_snapshot(
+            "Kode terbaca, tetapi isinya bukan QRIS yang valid. Pastikan gambar \
+             berisi kode QRIS asli."
+                .to_string(),
+        );
+        failed.qr_bbox = effective_bbox.map(|(x, y, w, h)| [x as i32, y as i32, w as i32, h as i32]);
+        failed.blur_var = laplacian_variance(&frame);
+        failed.is_blurry = failed.blur_var < DEFAULT_BLUR_THRESHOLD;
+        return Ok(failed);
+    }
+
     snapshot.blur_var = laplacian_variance(&frame);
     snapshot.is_blurry = snapshot.blur_var < DEFAULT_BLUR_THRESHOLD;
     snapshot.qr_bbox = effective_bbox.map(|(x, y, w, h)| [x as i32, y as i32, w as i32, h as i32]);
@@ -1194,8 +1437,16 @@ fn analyze_image_frame(
 pub fn run() {
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
-        .manage(CameraState::default())
-        .manage(HistoryState::default());
+        .manage(CameraState::default());
+
+    // History is loaded from the app data directory here rather than in
+    // `Default`, because only the Tauri app handle knows that path. A missing or
+    // unreadable file simply yields an empty history.
+    let builder = builder.setup(|app| {
+        let dir = app.path().app_data_dir().ok();
+        app.manage(HistoryState::load(dir));
+        Ok(())
+    });
 
     // Registered only on mobile, where an OS location service exists. On desktop
     // the plugin is not linked at all (see the `geolocation` feature), so this
@@ -1222,8 +1473,7 @@ pub fn run() {
             record_scan,
             history_entries,
             history_verify,
-            history_clear,
-            generate_report
+            history_clear
         ])
         .run(tauri::generate_context!())
         .expect("error while running Anti Timpa application");
@@ -1233,7 +1483,7 @@ pub fn run() {
 mod tests {
     use super::*;
 
-    /// Mirrors `generate_qris_with_crc` from `test_layer2.py`.
+    /// Builds a QRIS payload with a correct CRC-16 suffix for tests.
     fn generate_qris_with_crc(payload_without_crc: &str) -> String {
         let payload_to_checksum = format!("{payload_without_crc}6304");
         let mut crc: u16 = 0xFFFF;
@@ -1306,6 +1556,10 @@ mod tests {
         assert_eq!(r.mcc, "5411");
         assert_eq!(r.merchant_name, "WARUNG MAKMUR");
         assert_eq!(r.merchant_city, "JAKARTA");
+        assert!(
+            !r.merchant_id.is_empty(),
+            "the fixture carries a merchant account sub-TLV, so an id must be read"
+        );
         assert!(r.warnings.is_empty());
 
         let parsed = r.parsed_tlv.as_object().unwrap();
@@ -1508,8 +1762,8 @@ mod tests {
         assert_eq!(snap.combined_risk_level, "CAUTION");
     }
 
-    /// The payload-only path must declare that the optical layer did not run.
-    /// This is what stops a partial scan from being read as a clean bill.
+    /// The payload-only path must declare that the optical layer did not run,
+    /// otherwise a partial scan can be read as a clean bill.
     #[test]
     fn payload_only_scan_reports_incomplete_coverage() {
         let f = fixtures();
@@ -1626,9 +1880,9 @@ mod tests {
         assert_eq!(l2.merchant_city, "JAKARTA");
     }
 
-    /// The central claim of the whole project, as an executable assertion.
+    /// A sticker changes the optical score while leaving the payload intact.
     ///
-    /// A sticker overlays the margin, so: the payload still decodes identically
+    /// A sticker overlays the margin, so the payload still decodes identically
     /// (which is why every payload-level control misses the attack), and Layer 1
     /// is the layer that sees it. If this test ever passes with identical L1
     /// scores, the detector has gone blind.
@@ -1663,7 +1917,8 @@ mod tests {
         let clean_hit = qr::decode(&clean).unwrap().unwrap();
         let sticker_hit = qr::decode(&stickered).unwrap().unwrap();
 
-        // Payload-level: indistinguishable. This is the attack's whole point.
+        // Payload-level: indistinguishable, which is why payload checks alone
+        // cannot detect this.
         assert_eq!(clean_hit.payload, sticker_hit.payload);
 
         let bbox_of = |h: &qr::QrHit| (h.bbox[0], h.bbox[1], h.bbox[2], h.bbox[3]);
@@ -1922,5 +2177,101 @@ mod tests {
             );
         }
         assert!(!flag.load(Ordering::Relaxed));
+    }
+
+    // -----------------------------------------------------------------------
+    // Failed-read semantics
+    //
+    // A scan that read nothing must never look like a clean result. These pin
+    // the contract the UI relies on: `scannable == false` implies no score, no
+    // merchant, and a reason the user can act on.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn failed_snapshot_carries_no_score_and_states_why() {
+        let snap = failed_snapshot("Kamera tidak fokus.".to_string());
+
+        assert!(!snap.scannable, "a failed read is not a result");
+        assert_eq!(snap.error_reason.as_deref(), Some("Kamera tidak fokus."));
+        assert_eq!(snap.combined_score, 0.0, "no score may be fabricated");
+        assert_eq!(snap.combined_risk_level, "NO QR");
+        assert!(snap.findings.is_empty(), "a failed read has no findings");
+        assert!(snap.raw_qris_str.is_empty());
+        assert!(!snap.coverage.complete);
+
+        // The merchant fields must be empty, otherwise the UI could render a
+        // merchant name from a scan that read nothing.
+        assert_eq!(snap.l2["merchant_name"], "");
+        assert_eq!(snap.l2["merchant_city"], "");
+    }
+
+    #[test]
+    fn a_payload_scan_is_scannable() {
+        let f = fixtures();
+        let raw = format!(
+            "{}{}{}{}{}{}{}{}",
+            f.tag00, f.tag01_static, f.tag26, f.tag52_grocery, f.tag53_idr, f.tag58_id, f.tag59_warung, f.tag60_jakarta
+        );
+        let snap = analyze_payload(
+            generate_qris_with_crc(&raw),
+            Some("physical_camera_scan".to_string()),
+            None,
+            None,
+            None,
+        );
+
+        assert!(snap.scannable, "a decoded payload is a usable result");
+        assert_eq!(snap.error_reason, None);
+        assert_eq!(snap.l2["merchant_name"], "WARUNG MAKMUR");
+    }
+
+    #[test]
+    fn an_empty_payload_is_not_scannable() {
+        let snap = analyze_payload(String::new(), None, None, None, None);
+        assert!(!snap.scannable);
+        assert!(snap.error_reason.is_some(), "a reason must be supplied");
+    }
+
+    /// A blank image has no symbol, so `analyze_image_bytes` must return a
+    /// reason rather than a scored empty result.
+    #[test]
+    fn an_image_without_a_qr_is_not_scannable() {
+        let img = image::DynamicImage::ImageLuma8(image::GrayImage::from_pixel(
+            160,
+            160,
+            image::Luma([255u8]),
+        ));
+        let mut png = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut png, image::ImageFormat::Png)
+            .expect("encode fixture png");
+
+        let snap = analyze_image_bytes(png.into_inner(), None, None, None, None)
+            .expect("a blank image is not an error");
+
+        assert!(!snap.scannable, "no symbol means no result");
+        assert!(
+            snap.error_reason.as_deref().unwrap_or("").contains("Tidak ada kode QRIS"),
+            "got: {:?}",
+            snap.error_reason
+        );
+        assert_eq!(snap.combined_score, 0.0);
+    }
+
+    #[test]
+    fn capture_failed_reason_maps_raw_errors_to_actionable_text() {
+        let denied = capture_failed_reason("permission denied by platform");
+        assert!(denied.contains("Izin kamera"), "got: {denied}");
+
+        let busy = capture_failed_reason("device busy: already taken");
+        assert!(busy.contains("dipakai aplikasi lain"), "got: {busy}");
+
+        let missing = capture_failed_reason("no such device /dev/video0");
+        assert!(missing.contains("tidak terdeteksi"), "got: {missing}");
+
+        // Unknown errors must still produce a usable sentence, with the raw
+        // text kept for technical mode.
+        let other = capture_failed_reason("kernel said: EIO");
+        assert!(other.contains("gagal mengambil gambar"), "got: {other}");
+        assert!(other.contains("EIO"), "raw detail must survive: {other}");
     }
 }

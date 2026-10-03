@@ -7,15 +7,15 @@
 //!
 //! So every stage that can fail logs what it attempted and what it got back.
 //! These go to stderr, which means `npm run tauri:dev` shows them directly in
-//! the terminal — and on Android they land in logcat under the `ANTITIMPA`
-//! tag, matching the convention the old Kivy app used.
+//! the terminal, and on Android they land in logcat under the `ANTITIMPA`
+//! tag.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Debug-level logging is opt-in: set `ANTITIMPA_CAM_DEBUG=1`.
 ///
-/// Per-frame tracing is far too noisy to leave on, but it is exactly what you
-/// need when frames arrive in an unexpected format.
+/// Per-frame tracing is far too noisy to leave on, but it is useful when
+/// frames arrive in an unexpected format.
 static DEBUG_ENABLED: AtomicBool = AtomicBool::new(false);
 static INIT: std::sync::Once = std::sync::Once::new();
 
@@ -37,9 +37,6 @@ fn debug_enabled() -> bool {
 /// ```text
 /// adb logcat -s ANTITIMPA
 /// ```
-///
-/// which matches the tag convention the old Kivy app used, so existing
-/// debugging habits still work.
 fn emit(level: &str, msg: &str) {
     eprintln!("[ANTITIMPA][camera][{level}] {msg}");
 }
@@ -65,8 +62,8 @@ pub fn cam_debug(msg: &str) {
 
 /// Machine-readable snapshot of the camera subsystem for the UI.
 ///
-/// The old app had to scrape logcat to answer "is the camera actually up?".
-/// Surfacing this as a command instead means the UI can show the real state.
+/// Surfacing the camera state as a command lets the UI show the real state
+/// directly rather than scraping logs.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CameraDiagnostics {
     pub backend: String,

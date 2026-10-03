@@ -25,6 +25,10 @@ desktop-camera = ["dep:nokhwa"]
 # without an Android toolchain. Android builds enable it via cfg automatically.
 jni-bridge = []
 
+# Compiles the iOS C-ABI bridge on a desktop host so its unit tests can run
+# without Xcode. iOS builds enable it via cfg automatically.
+ios-bridge = []
+
 # Links the QR *encoder*, used by the synthetic backend to render real symbols.
 #
 # Off by default and never enabled in the app's own `tauri.conf.json` build: the

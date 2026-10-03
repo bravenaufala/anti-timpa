@@ -12,8 +12,8 @@ interface ImageImportPanelProps {
 /**
  * Analyse a photo instead of using the camera.
  *
- * Framed in the UI as what it actually is — a way to run the optical layer
- * without a camera — rather than as a headline feature. Two reasons:
+ * Framed in the UI as what it is (a way to run the optical layer without a
+ * camera) rather than as a headline feature. Two reasons:
  *
  * 1. The overlay attack happens at a physical QR in front of a camera, so the
  *    camera path is the one that addresses it. Presenting import as equivalent

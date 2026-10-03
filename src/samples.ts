@@ -1,7 +1,7 @@
 /**
- * Demo fixtures — these are the exact payloads from `test_layer2.py`, with the
- * CRC appended by the same CRC-16/CCITT-FALSE routine. They let you exercise
- * every rule from the UI before the camera pipeline exists.
+ * Demo fixtures. These are the exact payloads from `test_layer2.py`, with the
+ * CRC appended by the same CRC-16/CCITT-FALSE routine. They let every rule be
+ * exercised from the UI before the camera pipeline exists.
  */
 
 function crc16(input: string): string {

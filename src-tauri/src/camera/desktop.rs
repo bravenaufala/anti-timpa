@@ -1,30 +1,28 @@
 //! Desktop camera backend backed by `nokhwa`.
-//! Replaces `cv2.VideoCapture` from `main_desktop.py`. `nokhwa` is used
-//! rather than the `opencv` crate because it links against the system V4L2 /
-//! AVFoundation / MediaFoundation APIs directly, which keeps the build free of
-//! a full OpenCV dependency — a large part of the old app's ~100 MB APK.
+//! `nokhwa` is used rather than a full computer-vision toolkit because it
+//! links against the system V4L2 / AVFoundation / MediaFoundation APIs
+//! directly, which keeps the build free of heavyweight native dependencies.
 //!
 //! Threading note
 //! --------------
-//! `nokhwa::Camera` is **not** `Send`: it owns a `Box<dyn CaptureBackendTrait>`
+//! `nokhwa::Camera` is not `Send`: it owns a `Box<dyn CaptureBackendTrait>`
 //! whose trait object carries no `Send` bound. That rules out storing it in
 //! Tauri's `State`, which requires `Send + Sync`.
 //!
-//! Rather than reach for `unsafe impl Send` (which would be a lie — the driver
-//! handle genuinely is not thread-safe) or swap crates, the camera is owned by
-//! a dedicated thread. Commands send a request and block on the reply channel.
-//! This costs one thread and one channel round-trip per capture, and in return
-//! the capture path is provably serialised — which is what a camera device
+//! Rather than reach for `unsafe impl Send` (which would be a lie, because the
+//! driver handle genuinely is not thread-safe) or swap crates, the camera is
+//! owned by a dedicated thread. Commands send a request and block on the reply
+//! channel. This costs one thread and one channel round-trip per capture, and
+//! in return the capture path is serialised, which is what a camera device
 //! requires anyway.
 //!
 //! Reopenability
 //! -------------
 //! `release` is reversible: a released backend can be re-opened via
-//! [`DesktopCameraBackend::ensure_open`]. This matters because release is not
-//! always final — React StrictMode in development unmounts and remounts every
-//! component once, firing the cleanup effect on the throwaway unmount. A
-//! backend that latches into a released state would leave the camera
-//! permanently dead, which is exactly the bug this guards against.
+//! [`DesktopCameraBackend::ensure_open`]. Release is not always final because
+//! React StrictMode in development unmounts and remounts every component once,
+//! firing the cleanup effect on the throwaway unmount. A backend that latches
+//! into a released state would leave the camera permanently dead.
 
 use super::log::{cam_debug, cam_error, cam_info, cam_warn};
 use super::{CameraBackend, CameraError, Frame};
@@ -122,7 +120,7 @@ impl DesktopCameraBackend {
         ));
 
         // The previous thread has exited on Release, so the channel must be
-        // rebuilt too — the old receiver was dropped with it.
+        // rebuilt too, since the old receiver was dropped with it.
         let (req_tx, req_rx) = mpsc::channel::<Request>();
         let (res_tx, res_rx) = mpsc::channel::<Reply>();
         let (init_tx, init_rx) = mpsc::channel::<Result<(), CameraError>>();
@@ -160,12 +158,12 @@ impl DesktopCameraBackend {
 ///
 /// Hardcoding index 0 is wrong on many Linux machines: the kernel assigns
 /// `/dev/videoN` in probe order, and a laptop's built-in webcam is frequently
-/// **not** `video0`. UVC devices commonly expose two nodes per camera (a
+/// not `video0`. UVC devices commonly expose two nodes per camera (a
 /// capture node and a metadata node), so a naive "just try the first one"
 /// approach can also latch onto a node that opens but never produces frames.
 ///
 /// `nokhwa`'s query returns the real device list, so we use it rather than
-/// globbing `/dev/video*` ourselves — that also keeps this correct on macOS and
+/// globbing `/dev/video*` ourselves, which also keeps this correct on macOS and
 /// Windows, where the concept of `/dev/videoN` does not exist.
 pub fn list_device_indices() -> Vec<u32> {
     use nokhwa::query;
@@ -209,7 +207,7 @@ fn camera_thread(
     init_tx: Sender<Result<(), CameraError>>,
 ) {
     // Highest frame rate at any resolution; requesting a specific resolution
-    // is unreliable across webcams, a problem the old app also hit.
+    // is unreliable across webcams.
     let format = RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestFrameRate);
 
     cam_debug(&format!(
@@ -330,10 +328,10 @@ fn capture_once(camera: &mut Camera) -> Result<Frame, CameraError> {
     // grabbing the device, or a driver hiccup). Cheaper than failing the
     // capture outright, and self-healing matches `ensure_open`'s intent.
     //
-    // Note: on the V4L2 backend `open_stream` replaces the stream handle
-    // rather than being a no-op, so this must only run when the stream is
-    // genuinely closed — calling it on a live stream would drop the buffer
-    // queue and stall the next few frames.
+    // On the V4L2 backend `open_stream` replaces the stream handle rather than
+    // being a no-op, so this must only run when the stream is genuinely closed.
+    // Calling it on a live stream would drop the buffer queue and stall the
+    // next few frames.
     if !camera.is_stream_open() {
         cam_warn("stream tertutup saat akan capture; mencoba membuka kembali");
         camera.open_stream().map_err(|e| {

@@ -1,5 +1,5 @@
 import type { Layer1Result, Layer2Result, Layer3Result, MismatchKind } from "../types";
-import { riskColor } from "./RiskGauge";
+import { riskColor } from "../labels";
 
 interface DetailPanelProps {
   l1: Layer1Result;
@@ -26,7 +26,7 @@ function Row({ label, value, tone }: { label: string; value: string; tone?: stri
  * Human-readable meaning of each location-comparison outcome.
  *
  * Spelled out rather than shown as the raw enum because the distinction that
- * matters — "we compared and it differed" versus "we could not compare" — is
+ * matters ("we compared and it differed" versus "we could not compare") is
  * invisible in a score alone.
  */
 const MISMATCH_LABELS: Record<MismatchKind, string> = {
@@ -74,6 +74,7 @@ export function DetailPanel({
 
       <Row label="Merchant" value={l2.merchant_name} />
       <Row label="Kota Merchant" value={l2.merchant_city} />
+      <Row label="ID Merchant (NMID)" value={l2.merchant_id} />
       <Row label="Kota Klien" value={l3.client_city ?? ""} />
       <Row
         label="Perbandingan Lokasi"

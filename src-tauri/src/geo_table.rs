@@ -1,25 +1,25 @@
 //! Offline city coordinates, for turning a typed city name into a position.
 //!
-//! # Why this is separate from `layer3_geofence::CITIES`
+//! # Relationship to `layer3_geofence::CITIES`
 //!
 //! The table in `layer3_geofence` holds *reference points used for distance
 //! measurement*: a small, hand-checked set, plus the alias and border metadata the
-//! scoring tiers need. This table serves a different question — "the user typed
-//! 'bandung'; what are its coordinates?" — and is deliberately allowed to be
-//! broader and looser, because a wrong coordinate here produces a wrong distance,
-//! whereas a wrong entry in the scoring table produces a wrong verdict.
+//! scoring tiers need. This table serves a different question ("the user typed
+//! 'bandung'; what are its coordinates?") and is allowed to be broader and
+//! looser, because a wrong coordinate here produces a wrong distance, whereas a
+//! wrong entry in the scoring table produces a wrong verdict.
 //!
-//! # Why a hardcoded seed table rather than shipping a gazetteer
+//! # A seed table instead of a full gazetteer
 //!
 //! The full Indonesian administrative dataset is ~514 kabupaten/kota. Shipping it
 //! would mean a download or a large embedded blob, both of which are out of scope
-//! for a build that has no server. A seed table covering the major cities plus a
-//! comment telling the reader where to extend it is the honest interim: it makes
-//! the desktop path work for a demo, and it does not pretend to be complete.
+//! for a build that has no server. A seed table covering the major cities, plus a
+//! comment on where to extend it, is an interim measure: it makes the desktop
+//! path work for a demo, and it does not pretend to be complete.
 //!
-//! Lookups are deliberately exact-after-normalisation rather than fuzzy. A fuzzy
-//! matcher that resolves an unknown city to a *nearby* one would invent a
-//! distance, and inventing a distance changes a risk verdict.
+//! Lookups are exact-after-normalisation rather than fuzzy. A fuzzy matcher that
+//! resolves an unknown city to a *nearby* one would invent a distance, and
+//! inventing a distance changes a risk verdict.
 
 /// A city and its approximate centre.
 struct CityCoord {
@@ -113,7 +113,7 @@ fn normalize(input: &str) -> String {
 
 /// Resolves a typed city name to `(lat, lon)`.
 ///
-/// Returns `None` for an unknown city. That is a deliberate outcome, not a
+/// Returns `None` for an unknown city. That is an intended outcome, not a
 /// failure: Layer 3 then reports `DIFFERENT_CITY_UNBOUNDED` and says the distance
 /// could not be computed, rather than substituting a guess.
 pub fn coords_for(city: &str) -> Option<(f64, f64)> {

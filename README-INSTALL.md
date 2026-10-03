@@ -1,19 +1,15 @@
-# Panduan Instalasi — Anti Timpa QRIS Scanner
+# Panduan Instalasi: Anti Timpa QRIS Scanner
 
-Panduan praktis mem-build & menjalankan aplikasi di **Desktop**, **Android**, dan
-**iOS**. Semua analisis berjalan **lokal di perangkat** — tanpa server, tanpa
-cloud. Aplikasi dapat **scan berkali-kali** dan risiko/merchant berubah setiap
-kali kamera menunjuk QR.
-
-> Versi lama aplikasi ini adalah Python/KivyMD. **Kode Python sudah dihapus**;
-> sekarang React + Tauri + Rust (lihat [`README.md`](README.md)). Dokumen ini
-> sudah disesuaikan.
+Panduan praktis mem-build & menjalankan aplikasi di Desktop, Android, dan iOS.
+Semua analisis berjalan lokal di perangkat: tanpa server, tanpa cloud. Aplikasi
+dapat melakukan scan berkali-kali, dan risiko/merchant berubah setiap kali kamera
+menunjuk QR.
 
 ---
 
-## 🖥️ Desktop (Windows / macOS / Linux)
+## Desktop (Windows / macOS / Linux)
 
-**Persyaratan:** Node.js 18+, Rust 1.77.2+, webcam. Di Linux juga butuh
+Persyaratan: Node.js 18+, Rust 1.77.2+, webcam. Di Linux juga butuh
 `libwebkit2gtk-4.1-dev` dan `libv4l-dev`.
 
 ```bash
@@ -30,15 +26,15 @@ Atau langsung tanpa CLI global:
 npx tauri dev
 ```
 
-> Jika webcam tidak ada, app otomatis masuk **mode demo sintetik**; panel kamera
-> menandainya dengan chip "simulasi". Kamera desktop tidak selalu di `/dev/video0`
-> — lihat bagian "Pratinjau Kamera Langsung" di `README.md`.
+> Jika webcam tidak ada, app otomatis masuk mode demo sintetik; panel kamera
+> menandainya dengan chip "simulasi". Kamera desktop tidak selalu di
+> `/dev/video0`; lihat bagian "Pratinjau Kamera Langsung" di `README.md`.
 
 ---
 
-## 🤖 Android (APK)
+## Android (APK)
 
-**Persyaratan:** Android SDK + NDK, keystore rilis, Node.js + Rust.
+Persyaratan: Android SDK + NDK, keystore rilis, Node.js + Rust.
 
 ```bash
 export ANDROID_HOME="$HOME/Android/Sdk"
@@ -51,13 +47,12 @@ export ANDROID_NDK_HOME="$ANDROID_HOME/ndk/<versi>"
 ./build-apk.sh --install
 ```
 
-Hasil: **`dist-apk/antitimpa-release.apk`** (~8–9 MB).
+Hasil: `dist-apk/antitimpa-release.apk` (~8–9 MB).
 
-`build-apk.sh` sengaja memverifikasi simbol JNI di `.so` rilis **sebelum**
-menandatangani, karena build release memakai LTO + `strip = true` yang menghapus
-entry point JNI bila `build.rs` tidak memaksanya tetap ada. Kegagalannya hanya
-akan terlihat di perangkat sebagai `UnsatisfiedLinkError` saat kamera pertama
-dipanggil.
+`build-apk.sh` memverifikasi simbol JNI di `.so` rilis sebelum menandatangani,
+karena build release memakai LTO + `strip = true` yang menghapus entry point JNI
+bila `build.rs` tidak memaksanya tetap ada. Kegagalannya hanya akan terlihat di
+perangkat sebagai `UnsatisfiedLinkError` saat kamera pertama dipanggil.
 
 ### 3. Memasang jembatan kamera CameraX
 
@@ -70,8 +65,8 @@ Frame kamera Android masuk lewat JNI. Pasang di `src-tauri/gen/android/`:
 4. panggil `CameraBridge` dari `MainActivity`.
 
 Langkah lengkap + tabel diagnostik ada di
-**[`android/README.md`](android/README.md)**. **Jembatan ini belum pernah
-diverifikasi di perangkat nyata** — hanya sisi Rust-nya yang sudah diuji di host.
+[`android/README.md`](android/README.md). Jembatan ini belum pernah diverifikasi
+di perangkat nyata; hanya sisi Rust-nya yang sudah diuji di host.
 
 ### Cek log (jika crash / error)
 
@@ -79,22 +74,22 @@ diverifikasi di perangkat nyata** — hanya sisi Rust-nya yang sudah diuji di ho
 adb logcat -s ANTITIMPA
 ```
 
-Tag `ANTITIMPA` sengaja dipertahankan sama seperti aplikasi lama, sehingga
-kebiasaan dan alat diagnostik yang sudah ada tetap berlaku.
+Tag `ANTITIMPA` dipakai di seluruh aplikasi, sehingga kebiasaan dan alat
+diagnostik yang sudah ada tetap berlaku.
 
 ---
 
-## 🍎 iOS (IPA)
+## iOS (IPA)
 
 Bisa dibangun dari mana saja dengan `npx tauri ios build`, tetapi:
 
-> **Catatan kamera iOS:** belum ada bridge AVFoundation, jadi kamera iOS belum
+> Catatan kamera iOS: belum ada bridge AVFoundation, jadi kamera iOS belum
 > berfungsi. Layer 2 + Layer 3 tetap berjalan lokal di perangkat, dan Layer 1
 > memakai backend sintetik.
 
 ---
 
-## 🔍 Verifikasi cepat (tanpa build penuh)
+## Verifikasi cepat (tanpa build penuh)
 
 ```bash
 # Logika murni: Layer 2, Layer 3, QR, sintetik, JNI bridge
@@ -108,28 +103,27 @@ npx tsc --noEmit
 npm run build
 ```
 
-Pemeriksaan CRC payload (dulu `check_crc.py`) sekarang jadi command
-`verify_payload_crc` di Rust:
+Pemeriksaan CRC payload jadi command `verify_payload_crc` di Rust:
 
 ```bash
 cd src-tauri
 cargo test --no-default-features --features jni-bridge --lib -- tampered_payload
 ```
 
-## 📦 Paket yang dipakai per platform
+## Paket yang dipakai per platform
 
 | Kebutuhan | Desktop | Android | iOS |
 |---|---|---|---|
-| UI (React + Vite) | ✅ | ✅ | ✅ |
-| Tauri + Rust core | ✅ | ✅ | ✅ |
-| Kamera | `nokhwa` (V4L2/AVFoundation/MSMF) | CameraX via JNI | ❌ belum ada bridge |
+| UI (React + Vite) | Ya | Ya | Ya |
+| Tauri + Rust core | Ya | Ya | Ya |
+| Kamera | `nokhwa` (V4L2/AVFoundation/MSMF) | CameraX via JNI | Tidak (belum ada bridge) |
 | Decode QR | `rqrr` | `rqrr` | `rqrr` |
 | Layer 1 optik | frame sintetik | frame sintetik | frame sintetik |
-| Layer 2 EMVCo + CRC | ✅ | ✅ | ✅ |
-| Layer 3 geofence | ✅ (kota manual) | ✅ | ✅ |
+| Layer 2 EMVCo + CRC | Ya | Ya | Ya |
+| Layer 3 geofence | Ya (kota manual) | Ya | Ya |
 
-## 🚀 Menjalankan (mode utama)
+## Menjalankan (mode utama)
 
-- **Live scan:** arahkan kamera ke QRIS → risiko & merchant muncul.
-- **Input payload manual:** tempel string QRIS lalu tekan Analisis — berguna
-  untuk menguji tiap aturan risiko tanpa kamera (lihat chip contoh payload).
+- Live scan: arahkan kamera ke QRIS, lalu risiko & merchant muncul.
+- Input payload manual: tempel string QRIS lalu tekan Analisis. Berguna untuk
+  menguji tiap aturan risiko tanpa kamera (lihat chip contoh payload).

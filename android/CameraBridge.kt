@@ -27,8 +27,8 @@ import java.util.concurrent.Executors
  * bridge.stop()
  * ```
  *
- * The Rust side needs no knowledge of any of this beyond the frame slot, which
- * is the point of the design: the platform plumbing is entirely contained here.
+ * The Rust side needs no knowledge of any of this beyond the frame slot; the
+ * platform plumbing is contained here.
  */
 class CameraBridge(
     private val context: Context,
@@ -39,17 +39,17 @@ class CameraBridge(
 
         init {
             // Load the Rust core. Done in a static initializer so a missing
-            // library surfaces as a clear error at first use rather than a
-            // mysterious UnsatisfiedLinkError deep inside a frame callback.
+            // library surfaces as a clear error at first use rather than an
+            // UnsatisfiedLinkError deep inside a frame callback.
             System.loadLibrary("anti_timpa_lib")
         }
 
         /**
          * Pushes one RGBA frame into the Rust slot. Implemented in Rust.
          *
-         * The buffer must be a **direct** `ByteBuffer`. The Rust side obtains
+         * The buffer must be a direct `ByteBuffer`. The Rust side obtains
          * its address via `GetDirectBufferAddress`, so a heap buffer would be
-         * rejected — and passing one as a raw pointer is what caused an earlier
+         * rejected, and passing one as a raw pointer is what caused an earlier
          * `SIGSEGV` inside `memcpy`.
          *
          * The length is read on the Rust side from the buffer's capacity, so it
@@ -87,15 +87,15 @@ class CameraBridge(
      */
     fun hasPermission(): Boolean =
         ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
-            PackageManager.PERMISSION_GRANTED
+                PackageManager.PERMISSION_GRANTED
 
     /**
      * Starts the capture session.
      *
      * Returns `false` (with a logcat explanation) when the permission is
-     * missing or the camera cannot be bound. Deliberately returns a status
-     * instead of throwing so the caller can show a UI message and fall back
-     * without a crash handler.
+     * missing or the camera cannot be bound. It returns a status instead of
+     * throwing so the caller can show a UI message and fall back without a
+     * crash handler.
      */
     fun start(): Boolean {
         if (!hasPermission()) {

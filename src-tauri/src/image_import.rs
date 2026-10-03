@@ -1,31 +1,31 @@
-//! Image import — running the optical pipeline on a photo instead of a camera.
+//! Image import: running the optical pipeline on a photo instead of a camera.
 //!
-//! # Why this exists, stated honestly
+//! # Purpose
 //!
-//! This is a **validation and demonstration path, not a product feature.** The
+//! This is a validation and demonstration path, not a product feature. The
 //! overlay attack happens at a physical QR in front of a camera, and the
 //! camera path in `lib.rs::capture_and_analyze` is the one that addresses it.
 //!
 //! What this module is actually for:
 //!
-//! 1. **Fitting the Layer 1 thresholds against real photographs.** The camera
-//!    path can only be exercised on a device with a physical QRIS sticker.
-//!    Importing a photo makes it possible to check — and falsify — the
-//!    constants that were fitted on synthetic fixtures.
-//! 2. **Demonstrating Layer 1 without hardware.** A laptop demo with no camera
-//!    and no printed sticker can still show the optical layer working.
+//! 1. Fitting the Layer 1 thresholds against real photographs. The camera path
+//!    can only be exercised on a device with a physical QRIS sticker. Importing
+//!    a photo makes it possible to check and falsify the constants that were
+//!    fitted on synthetic fixtures.
+//! 2. Demonstrating Layer 1 without hardware. A laptop demo with no camera and
+//!    no printed sticker can still show the optical layer working.
 //!
-//! It is kept in a separate module, with its own honest doc comment, so nobody
-//! mistakes it for the primary detection path.
+//! It is kept in a separate module, with its own doc comment, so it is not
+//! mistaken for the primary detection path.
 //!
-//! # What an imported photo cannot do
+//! # Limits of a single photo
 //!
 //! The temporal glare signal needs a *burst* of frames of the same untouched
 //! scene. A single imported photo has no burst, so
 //! [`imported_frame_has_burst`] is always `false` and Layer 1 runs with its
-//! spatial signals only. Pretending otherwise — for instance by re-analysing the
+//! spatial signals only. Pretending otherwise (for instance by re-analysing the
 //! same image four times and reporting the resulting zero variance as
-//! "no glare risk" — would manufacture a measurement. Instead the caller is
+//! "no glare risk") would manufacture a measurement. Instead the caller is
 //! told the temporal check was skipped.
 
 use crate::camera::Frame;
@@ -36,7 +36,7 @@ use image::{DynamicImage, ImageReader, RgbImage};
 ///
 /// A modern phone photo is 4000+ px on the long edge and roughly 48 MB decoded.
 /// Layer 1's metrics are scale-invariant because the detection ring is expressed
-/// as a fraction of the symbol, so downscaling costs no signal — but it keeps
+/// as a fraction of the symbol, so downscaling costs no signal, but it keeps
 /// the imported frame in the same resolution regime as a camera frame, which is
 /// what makes measurements from the two paths comparable at all.
 pub const MAX_IMPORT_DIMENSION: u32 = 1600;
@@ -55,7 +55,7 @@ pub struct ImportInfo {
     pub height: u32,
     /// True when the frame was downscaled to stay under [`MAX_IMPORT_DIMENSION`].
     pub downscaled: bool,
-    /// Always `false` for a single imported image — see the module docs.
+    /// Always `false` for a single imported image. See the module docs.
     pub imported_frame_has_burst: bool,
 }
 
@@ -278,8 +278,8 @@ mod tests {
     /// The finding that motivated giving the synthetic backend a real symbol.
     ///
     /// The sticker is drawn in the margin, *outside* the symbol's module area, so
-    /// it must not disturb decoding. That is what makes the attack interesting:
-    /// the payload still reads cleanly while the object has been tampered with.
+    /// it must not disturb decoding: the payload still reads cleanly while the
+    /// object has been tampered with.
     #[test]
     fn the_sticker_does_not_prevent_decoding() {
         let clean = synthetic_frame(default_spec());
@@ -295,8 +295,8 @@ mod tests {
 
         assert_eq!(
             clean_hit.payload, sticker_hit.payload,
-            "an overlay does not alter the payload, which is exactly why \
-             payload-level checks cannot detect it"
+            "an overlay does not alter the payload, so payload-level checks \
+             cannot detect it"
         );
     }
 

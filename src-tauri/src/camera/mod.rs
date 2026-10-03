@@ -1,16 +1,12 @@
 //! Camera abstraction for the Tauri rewrite.
 //!
-//! The goal of this prototype is to prove that the same command surface works
-//! on desktop and mobile while the *implementation* differs per platform.
-//! A [`CameraBackend`] is the seam:
+//! The prototype's goal is to prove that the same command surface works on
+//! desktop and mobile even though the implementation differs per platform.
+//! [`CameraBackend`] is the seam:
 //!
-//! * `nokhwa`      -> desktop webcams (Linux/macOS/Windows)
-//! * `MobileCamera`-> Android/iOS, frames pushed from a native plugin
-//! * `Synthetic`   -> deterministic fallback so the pipeline is always testable
-//!
-//! This mirrors what `main_mobile.py` / `main_desktop.py` did with
-//! Camera4Kivy and `cv2.VideoCapture`, but without the per-platform Kivy
-//! widget code and without the `plyer` monkeypatching the old app needed.
+//! * `nokhwa`       -> desktop webcams (Linux/macOS/Windows)
+//! * `MobileCamera` -> Android/iOS, frames pushed from a native plugin
+//! * `Synthetic`    -> deterministic fallback so the pipeline is always testable
 
 pub mod log;
 pub mod preview;
@@ -19,12 +15,13 @@ pub mod synthetic;
 #[cfg(feature = "desktop-camera")]
 pub mod desktop;
 
-// Also compiled on desktop under `jni-bridge`, so the Android JNI bridge's
-// unit tests can run without an Android toolchain.
+// Also compiled on desktop under `jni-bridge` / `ios-bridge`, so the mobile
+// bridges' unit tests can run without a device toolchain.
 #[cfg(any(
     target_os = "android",
     target_os = "ios",
-    feature = "jni-bridge"
+    feature = "jni-bridge",
+    feature = "ios-bridge"
 ))]
 pub mod mobile;
 
@@ -32,7 +29,7 @@ use serde::{Deserialize, Serialize};
 
 /// A decoded camera frame in the layout the analysis layers expect.
 ///
-/// `rgb` is row-major, 8 bits per channel, 3 channels — matching what
+/// `rgb` is row-major, 8 bits per channel, 3 channels, matching what
 /// `image::RgbImage` produces.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Frame {
@@ -58,8 +55,7 @@ impl Frame {
         })
     }
 
-    /// Converts to a grayscale buffer using Rec. 601 luma, matching the
-    /// `cv2.COLOR_BGR2GRAY` weighting used by Python Layer 1.
+    /// Converts to a grayscale buffer using Rec. 601 luma weighting.
     pub fn to_gray(&self) -> Vec<u8> {
         let mut gray = Vec::with_capacity((self.width * self.height) as usize);
         for px in self.rgb.chunks_exact(3) {
@@ -109,24 +105,24 @@ pub trait CameraBackend: Send {
     /// Whether a usable camera was actually opened.
     fn is_ready(&self) -> bool;
 
-    /// Grabs one frame. One-shot by design: the old app found continuous
-    /// per-frame decode caused hangs, so the UI pulls on demand.
+    /// Grabs one frame. One-shot by design: continuous per-frame decode can
+    /// cause hangs, so the UI pulls on demand.
     fn capture(&mut self) -> Result<Frame, CameraError>;
 
     /// Releases the device. Called on app shutdown.
     ///
     /// Implementations must tolerate this being called spuriously and must
-    /// remain re-openable afterwards — React StrictMode unmounts components
+    /// remain re-openable afterwards. React StrictMode unmounts components
     /// once in development, firing the cleanup effect on a throwaway mount.
     fn release(&mut self);
 }
 
 /// Returns the backend appropriate for the current platform.
 ///
-/// Deliberately infallible: on a platform where capture is unavailable the
+/// The function is infallible: on a platform where capture is unavailable the
 /// caller gets a `Synthetic` backend, keeping the pipeline exercisable. This
-/// mirrors the old app's "mode simulasi" fallback so the UI never has to
-/// special-case a missing camera.
+/// provides the "mode simulasi" fallback so the UI never has to special-case
+/// a missing camera.
 pub fn default_backend() -> Box<dyn CameraBackend> {
     #[cfg(any(target_os = "android", target_os = "ios"))]
     {
@@ -168,10 +164,10 @@ pub fn default_backend() -> Box<dyn CameraBackend> {
 
             log::cam_info(&format!("memindai kamera pada index: {candidates:?}"));
 
-            // Try each device until one opens *and* yields a frame. Opening
+            // Try each device until one opens and yields a frame. Opening
             // successfully is not sufficient: UVC metadata nodes open happily
             // but never deliver video, so the warm-up check inside `open` is
-            // what actually distinguishes a usable capture device.
+            // what distinguishes a usable capture device.
             for index in candidates {
                 match desktop::DesktopCameraBackend::open(index) {
                     Ok(backend) => {

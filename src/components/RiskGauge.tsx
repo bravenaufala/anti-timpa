@@ -1,21 +1,6 @@
 import { useMemo } from "react";
 import type { RiskLevel } from "../types";
-
-/**
- * Visual risk band colors, keyed by the risk level strings emitted by Rust.
- * Kept as an explicit map so an unknown band fails visibly rather than silently.
- */
-const RISK_COLORS: Record<string, string> = {
-  "LOW RISK": "#2e7d32",
-  CAUTION: "#f9a825",
-  "HIGH RISK": "#c62828",
-  "NO QR": "#546e7a",
-  "NOT RUN": "#546e7a",
-  "MENUNGGU SCAN": "#546e7a",
-};
-
-export const riskColor = (level: RiskLevel | string): string =>
-  RISK_COLORS[level] ?? "#546e7a";
+import { riskColor } from "../labels";
 
 interface RiskGaugeProps {
   score: number;

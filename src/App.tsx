@@ -4,8 +4,8 @@ import {
   cameraDiagnostics,
   captureAndAnalyze,
   isTauri,
-  releaseCamera,
   recordScan,
+  releaseCamera,
 } from "./api";
 import type { CameraDiagnostics, OpticalType, ScanSnapshot } from "./types";
 import { describeLocation, resolveLocation, type ResolvedLocation } from "./location";
@@ -13,7 +13,7 @@ import { RiskGauge } from "./components/RiskGauge";
 import { DetailPanel } from "./components/DetailPanel";
 import { CoverageBanner } from "./components/CoverageBanner";
 import { FindingsList } from "./components/FindingsList";
-import { ReportPanel } from "./components/ReportPanel";
+import { ScanResultCard } from "./components/ScanResultCard";
 import { HistoryPanel } from "./components/HistoryPanel";
 import { CameraPanel } from "./components/CameraPanel";
 import { CameraPreview } from "./components/CameraPreview";
@@ -38,6 +38,7 @@ const EMPTY_SNAPSHOT: ScanSnapshot = {
     mcc: "",
     merchant_name: "",
     merchant_city: "",
+    merchant_id: "",
     parsed_tlv: {},
     warnings: [],
   },
@@ -59,6 +60,8 @@ const EMPTY_SNAPSHOT: ScanSnapshot = {
   qr_bbox: null,
   raw_qris_str: "",
   no_qr_reason: null,
+  scannable: false,
+  error_reason: null,
   coverage: {
     optical_ran: false,
     payload_ran: false,
@@ -70,13 +73,16 @@ const EMPTY_SNAPSHOT: ScanSnapshot = {
   chain_hash: null,
 };
 
+/** Remembers the UI mode between launches. */
+const TECHNICAL_KEY = "antitimpa.technical";
+
 /**
  * Attempts a coarse device position.
  *
- * Moved to `./location` and replaced there. The old version called
- * `navigator.geolocation` directly, which never worked inside the Tauri WebView
- * on desktop — the error was swallowed and Layer 3 reported "location
- * unavailable" on every scan while the UI still showed a location checkbox.
+ * The logic lives in `./location`. `navigator.geolocation` is deliberately not
+ * called directly: it does not work inside the Tauri WebView on desktop, and a
+ * swallowed error made Layer 3 report "location unavailable" on every scan
+ * while the UI still showed a location checkbox.
  */
 
 export default function App() {
@@ -89,8 +95,16 @@ export default function App() {
   const [camera, setCamera] = useState<CameraDiagnostics | null>(null);
   const [useDeviceGps, setUseDeviceGps] = useState(true);
   const [lastLocation, setLastLocation] = useState<ResolvedLocation | null>(null);
-  const [lastSource, setLastSource] = useState("manual");
   const [historyRevision, setHistoryRevision] = useState(0);
+  /**
+   * Drives the whole UI: off is a simple, plain-language view for a shopper;
+   * on exposes the layer scores, raw payload, camera diagnostics, and the other
+   * tools used while developing and calibrating.
+   */
+  const [technical, setTechnical] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return window.localStorage.getItem(TECHNICAL_KEY) === "1";
+  });
   /**
    * Preview is opt-in and off by default.
    *
@@ -105,9 +119,9 @@ export default function App() {
    *
    * In development StrictMode mounts, unmounts, and remounts every component
    * once. The cleanup of that throwaway unmount used to call `releaseCamera`,
-   * which killed the camera before the user's first capture — the
-   * "kamera desktop sudah dilepas" bug. The Rust side now self-heals on
-   * capture, but the correct fix is also to not release on a spurious unmount.
+   * which killed the camera before the user's first capture (the
+   * "kamera desktop sudah dilepas" bug). The Rust side now self-heals on
+   * capture, but the fix is also to not release on a spurious unmount.
    */
   const releasedRef = useRef(false);
 
@@ -126,8 +140,7 @@ export default function App() {
     void refreshCamera();
   }, [refreshCamera]);
 
-  // Release the device when the window really goes away, mirroring the old
-  // app's `on_stop` hook.
+  // Release the device when the window is actually closing.
   useEffect(() => {
     if (!isTauri()) return;
 
@@ -143,17 +156,26 @@ export default function App() {
 
     window.addEventListener("beforeunload", release);
 
-    // Deliberately NOT calling release() here.
+    // release() is not called here on purpose.
     //
-    // Effect cleanup is not "the app is closing" — React StrictMode runs it on
-    // an intentional throwaway unmount in development, and the window may also
-    // be hidden and reshown. Releasing there killed the camera before the
+    // Effect cleanup does not mean "the app is closing". React StrictMode runs
+    // it on an intentional throwaway unmount in development, and the window may
+    // also be hidden and reshown. Releasing there killed the camera before the
     // user's first capture. `beforeunload` covers real teardown, and Rust's
     // `Drop` handles process exit, so no unmount-time release is needed.
     return () => {
       window.removeEventListener("beforeunload", release);
     };
   }, []);
+
+  const toggleTechnical = (on: boolean) => {
+    setTechnical(on);
+    try {
+      window.localStorage.setItem(TECHNICAL_KEY, on ? "1" : "0");
+    } catch {
+      // A blocked localStorage (private mode) must not break the toggle.
+    }
+  };
 
   /**
    * Builds the location argument for Layer 3.
@@ -170,14 +192,34 @@ export default function App() {
     return resolved;
   }, [clientCity, useDeviceGps]);
 
+  /**
+   * Publishes a scan result and saves it to the local history.
+   *
+   * Saving is automatic and unconditional for scannable results, so the user
+   * does not have to remember to keep a scan. Results without a readable QR are
+   * rejected by the backend and never reach the history, so a failed read
+   * cannot create a row.
+   */
+  const commitResult = useCallback(async (result: ScanSnapshot, source: string) => {
+    setSnapshot(result);
+
+    if (!isTauri() || !result.scannable) return;
+    try {
+      await recordScan(result, source, Date.now());
+      setHistoryRevision((n) => n + 1);
+    } catch {
+      // A failed save must not hide the result the user just scanned; the
+      // history panel will simply not show the new row.
+    }
+  }, []);
+
   const runCapture = useCallback(async () => {
     setBusy(true);
     setError(null);
     try {
       const location = await buildLocation();
       const result = await captureAndAnalyze(opticalType, location);
-      setSnapshot(result);
-      setLastSource("camera");
+      await commitResult(result, "camera");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -186,7 +228,7 @@ export default function App() {
       await refreshCamera();
       setBusy(false);
     }
-  }, [opticalType, buildLocation, refreshCamera]);
+  }, [opticalType, buildLocation, commitResult, refreshCamera]);
 
   const runAnalysis = async (raw: string, source = "manual") => {
     const trimmed = raw.trim();
@@ -200,9 +242,8 @@ export default function App() {
     try {
       const location = await buildLocation();
       const result = await analyzePayload(trimmed, opticalType, location);
-      setSnapshot(result);
       setPayload(trimmed);
-      setLastSource(source);
+      await commitResult(result, source);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -210,32 +251,31 @@ export default function App() {
     }
   };
 
-  const saveToHistory = async () => {
-    if (!isTauri()) return;
-    setError(null);
-    try {
-      await recordScan(snapshot, lastSource, Date.now());
-      setHistoryRevision((n) => n + 1);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  };
-
-  /** Applied by the camera panel, the manual form, and the import panel alike. */
+  /** Applied by the image import panel in technical mode. */
   const applyResult = (result: ScanSnapshot, source: string) => {
-    setSnapshot(result);
-    setLastSource(source);
+    void commitResult(result, source);
   };
 
-  const hasResult = snapshot.combined_risk_level !== "NO QR";
+  const hasResult = snapshot.scannable;
 
   return (
     <div className="app">
       <header className="topbar">
-        <h1>Anti Timpa QRIS Scanner</h1>
+        <div className="topbar-main">
+          <h1>Anti Timpa QRIS Scanner</h1>
+          <label className="switch" title="Tampilkan detail teknis">
+            <input
+              type="checkbox"
+              checked={technical}
+              onChange={(e) => toggleTechnical(e.target.checked)}
+            />
+            <span>Mode teknis</span>
+          </label>
+        </div>
         <span className="topbar-sub">
-          React + Tauri · Layer 1, 2 &amp; 3 aktif
-          {isTauri() ? "" : " · mode browser (tanpa backend)"}
+          {technical
+            ? `React + Tauri · Layer 1, 2 & 3 aktif${isTauri() ? "" : " · mode browser (tanpa backend)"}`
+            : "Periksa keamanan kode QRIS sebelum membayar"}
         </span>
       </header>
 
@@ -246,21 +286,23 @@ export default function App() {
       )}
 
       <main className="content">
-        <section className="panel">
-          <RiskGauge score={snapshot.combined_score} level={snapshot.combined_risk_level} />
-          {hasResult && snapshot.coverage.summary && (
-            <CoverageBanner coverage={snapshot.coverage} />
-          )}
-          {snapshot.no_qr_reason && (
-            <p className="hint hint-action">{snapshot.no_qr_reason}</p>
-          )}
-          {!hasResult && !snapshot.no_qr_reason && (
-            <p className="hint">
-              Ambil foto QRIS lewat kamera, atau tempel payload di bawah.
-            </p>
-          )}
-          {hasResult && <FindingsList findings={snapshot.findings} />}
-        </section>
+        {hasResult && technical ? (
+          <section className="panel">
+            <RiskGauge score={snapshot.combined_score} level={snapshot.combined_risk_level} />
+            {snapshot.coverage.summary && <CoverageBanner coverage={snapshot.coverage} />}
+            <FindingsList findings={snapshot.findings} technical />
+          </section>
+        ) : (
+          <ScanResultCard snapshot={snapshot} busy={busy} />
+        )}
+
+        <CameraPanel
+          info={camera}
+          busy={busy}
+          onCapture={runCapture}
+          disabled={!isTauri()}
+          technical={technical}
+        />
 
         <section className="panel">
           <label className="toggle">
@@ -270,7 +312,7 @@ export default function App() {
               onChange={(e) => setPreviewOn(e.target.checked)}
               disabled={!isTauri()}
             />
-            <span>Pratinjau kamera langsung</span>
+            <span>Pratinjau kamera</span>
           </label>
 
           {/*
@@ -279,157 +321,141 @@ export default function App() {
            * Preview and analysis share one camera device, and the driver
            * returns "already taken" rather than queueing when both ask at once.
            * Without this pause, a preview tick landing mid-capture would make
-           * the user's scan fail intermittently — the worst kind of bug to
-           * diagnose. Pausing costs one preview frame and removes the race.
+           * the user's scan fail intermittently. Pausing costs one preview frame
+           * and removes the race.
            */}
-          {previewOn && <CameraPreview active={previewOn && !busy} />}
+          {previewOn && <CameraPreview active={previewOn && !busy} technical={technical} />}
         </section>
 
-        <CameraPanel
-          info={camera}
-          busy={busy}
-          onCapture={runCapture}
-          disabled={!isTauri()}
-        />
-
-        <ImageImportPanel
-          busy={busy}
-          opticalType={opticalType}
-          location={{
-            city: clientCity.trim() || null,
-            lat: lastLocation?.lat ?? null,
-            lon: lastLocation?.lon ?? null,
-          }}
-          onResult={applyResult}
-        />
-
-        <section className="panel">
-          <span className="row-label">Analisis Manual (tanpa kamera)</span>
-          <label className="field">
-            <span className="row-label">Payload QRIS</span>
-            <textarea
-              className="input"
-              rows={4}
-              value={payload}
-              placeholder="00020101021126..."
-              onChange={(e) => setPayload(e.target.value)}
-            />
-          </label>
-
-          <label className="field">
-            <span className="row-label">Kota Klien (opsional)</span>
-            <input
-              className="input"
-              type="text"
-              value={clientCity}
-              placeholder="mis. Bandung"
-              onChange={(e) => setClientCity(e.target.value)}
-            />
-          </label>
-
-          <label className="toggle">
-            <input
-              type="checkbox"
-              checked={useDeviceGps}
-              onChange={(e) => setUseDeviceGps(e.target.checked)}
-            />
-            <span>Sertakan lokasi perangkat (untuk estimasi jarak)</span>
-          </label>
-          <p className="hint hint-small">
-            Di ponsel, ini meminta izin lokasi ke sistem operasi. Di desktop tidak
-            ada layanan lokasi sistem, jadi koordinat diambil dari tabel kota
-            offline bawaan berdasarkan nama kota di atas. Koordinat hanya dipakai
-            untuk menghitung jarak ke kota merchant, dan tidak dikirim ke mana pun.
-          </p>
-          {lastLocation && (
-            <p className="hint hint-small">
-              Lokasi terakhir dipakai: <strong>{describeLocation(lastLocation)}</strong>
-              {lastLocation.note ? ` — ${lastLocation.note}` : ""}
-            </p>
-          )}
-
-          <label className="field">
-            <span className="row-label">Konteks Optik</span>
-            <select
-              className="input"
-              value={opticalType}
-              onChange={(e) => setOpticalType(e.target.value as OpticalType)}
-            >
-              <option value="physical_camera_scan">Kamera fisik (physical_camera_scan)</option>
-              <option value="imported_image">Gambar impor (imported_image)</option>
-            </select>
-          </label>
-
-          {/*
-           * Analisis manual cannot run Layer 1: a pasted payload carries no
-           * pixels. Saying so here, before the button is pressed, is cheaper
-           * than letting the user infer it from a coverage warning afterwards.
-           */}
-          <p className="hint hint-small">
-            Catatan: analisis manual hanya menjalankan Layer 2 dan 3. Penempelan
-            fisik pada QR tidak dapat dideteksi tanpa gambar — gunakan kamera
-            untuk itu.
-          </p>
-
-          <button className="primary" disabled={busy} onClick={() => void runAnalysis(payload)}>
-            {busy ? "Menganalisis…" : "Analisis"}
-          </button>
-
-          {error && <div className="error">{error}</div>}
-        </section>
-
-        <section className="panel">
-          <span className="row-label">Contoh Payload</span>
-          <div className="samples">
-            {SAMPLE_PAYLOADS.map((s) => (
-              <button
-                key={s.label}
-                className="sample"
-                disabled={busy}
-                title={s.description}
-                onClick={() => void runAnalysis(s.payload, "sample")}
-              >
-                {s.label}
-              </button>
-            ))}
-          </div>
-        </section>
-
-        {hasResult && (
+        {technical && (
           <>
-            <DetailPanel
-              l1={snapshot.l1}
-              l2={snapshot.l2}
-              l3={snapshot.l3}
-              rawPayload={snapshot.raw_qris_str}
-              blurVar={snapshot.blur_var}
-              isBlurry={snapshot.is_blurry}
+            <ImageImportPanel
+              busy={busy}
+              opticalType={opticalType}
+              location={{
+                city: clientCity.trim() || null,
+                lat: lastLocation?.lat ?? null,
+                lon: lastLocation?.lon ?? null,
+              }}
+              onResult={applyResult}
             />
 
             <section className="panel">
-              <span className="row-label">Arsipkan Hasil</span>
+              <span className="row-label">Analisis Manual (tanpa kamera)</span>
+              <label className="field">
+                <span className="row-label">Payload QRIS</span>
+                <textarea
+                  className="input"
+                  rows={4}
+                  value={payload}
+                  placeholder="00020101021126..."
+                  onChange={(e) => setPayload(e.target.value)}
+                />
+              </label>
+
+              <label className="field">
+                <span className="row-label">Kota Klien (opsional)</span>
+                <input
+                  className="input"
+                  type="text"
+                  value={clientCity}
+                  placeholder="mis. Bandung"
+                  onChange={(e) => setClientCity(e.target.value)}
+                />
+              </label>
+
+              <label className="toggle">
+                <input
+                  type="checkbox"
+                  checked={useDeviceGps}
+                  onChange={(e) => setUseDeviceGps(e.target.checked)}
+                />
+                <span>Sertakan lokasi perangkat (untuk estimasi jarak)</span>
+              </label>
               <p className="hint hint-small">
-                Menyimpan scan ini ke riwayat sesi, lengkap dengan hash rantai
-                untuk pemeriksaan integritas. Riwayat tidak ditulis ke disk.
+                Di ponsel, ini meminta izin lokasi ke sistem operasi. Di desktop tidak
+                ada layanan lokasi sistem, jadi koordinat diambil dari tabel kota
+                offline bawaan berdasarkan nama kota di atas. Koordinat hanya dipakai
+                untuk menghitung jarak ke kota merchant, dan tidak dikirim ke mana pun.
               </p>
-              <button
-                className="sample"
-                disabled={!isTauri() || busy}
-                onClick={() => void saveToHistory()}
-              >
-                Simpan ke riwayat
+              {lastLocation && (
+                <p className="hint hint-small">
+                  Lokasi terakhir dipakai: <strong>{describeLocation(lastLocation)}</strong>
+                  {lastLocation.note ? ` — ${lastLocation.note}` : ""}
+                </p>
+              )}
+
+              <label className="field">
+                <span className="row-label">Konteks Optik</span>
+                <select
+                  className="input"
+                  value={opticalType}
+                  onChange={(e) => setOpticalType(e.target.value as OpticalType)}
+                >
+                  <option value="physical_camera_scan">Kamera fisik (physical_camera_scan)</option>
+                  <option value="imported_image">Gambar impor (imported_image)</option>
+                </select>
+              </label>
+
+              {/*
+               * Analisis manual cannot run Layer 1: a pasted payload carries no
+               * pixels. Saying so here, before the button is pressed, is cheaper
+               * than letting the user infer it from a coverage warning afterwards.
+               */}
+              <p className="hint hint-small">
+                Catatan: analisis manual hanya menjalankan Layer 2 dan 3. Penempelan
+                fisik pada QR tidak dapat dideteksi tanpa gambar — gunakan kamera
+                untuk itu.
+              </p>
+
+              <button className="primary" disabled={busy} onClick={() => void runAnalysis(payload)}>
+                {busy ? "Menganalisis…" : "Analisis"}
               </button>
             </section>
 
-            <ReportPanel
-              snapshot={snapshot}
-              source={lastSource}
-              disabled={!isTauri() || busy}
-            />
+            <section className="panel">
+              <span className="row-label">Contoh Payload</span>
+              <div className="samples">
+                {SAMPLE_PAYLOADS.map((s) => (
+                  <button
+                    key={s.label}
+                    className="sample"
+                    disabled={busy}
+                    title={s.description}
+                    onClick={() => void runAnalysis(s.payload, "sample")}
+                  >
+                    {s.label}
+                  </button>
+                ))}
+              </div>
+            </section>
+
+            {hasResult && (
+              <DetailPanel
+                l1={snapshot.l1}
+                l2={snapshot.l2}
+                l3={snapshot.l3}
+                rawPayload={snapshot.raw_qris_str}
+                blurVar={snapshot.blur_var}
+                isBlurry={snapshot.is_blurry}
+              />
+            )}
           </>
         )}
 
-        <HistoryPanel revision={historyRevision} disabled={!isTauri()} />
+        {error && (
+          <div className="error">
+            {technical
+              ? error
+              : "Terjadi masalah saat memindai. Coba lagi; aktifkan mode teknis untuk melihat detail."}
+          </div>
+        )}
+
+        <HistoryPanel
+          revision={historyRevision}
+          disabled={!isTauri()}
+          technical={technical}
+        />
       </main>
     </div>
   );

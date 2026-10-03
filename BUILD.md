@@ -1,10 +1,9 @@
-# Panduan Build — Anti Timpa QRIS Scanner
+# Panduan Build: Anti Timpa QRIS Scanner
 
-Aplikasi lintas-platform (desktop / Android / iOS) berbasis **React + Tauri +
-Rust** yang menjalankan analisis QRIS **100% lokal per perangkat**.
+Aplikasi lintas-platform (desktop / Android / iOS) berbasis React + Tauri + Rust
+yang menjalankan analisis QRIS sepenuhnya lokal per perangkat.
 
-> Struktur kode, ringkasan migrasi, dan daftar yang belum selesai ada di
-> **[`README.md`](README.md)**.
+> Struktur kode dan daftar yang belum selesai ada di [`README.md`](README.md).
 
 | Platform | Framework | Catatan |
 |---|---|---|
@@ -61,10 +60,10 @@ Backend Rust tidak aktif di mode ini; UI menampilkan peringatan dan tombol
 analisis tidak berfungsi. Berguna untuk mengubah tampilan tanpa menunggu
 kompilasi Rust.
 
-> **Catatan ruang disk.** Kompilasi Tauri butuh beberapa GB untuk codegen. Bila
-> disk hampir penuh, `cargo clean` di `src-tauri/` lalu build ulang. Untuk
-> sekadar memeriksa logika, pakai perintah validasi di bagian 3 yang jauh lebih
-> ringan (`--no-default-features` melewatkan nokhwa/V4L2).
+> Catatan ruang disk. Kompilasi Tauri butuh beberapa GB untuk codegen. Bila disk
+> hampir penuh, `cargo clean` di `src-tauri/` lalu build ulang. Untuk sekadar
+> memeriksa logika, pakai perintah validasi di bagian 3 yang jauh lebih ringan
+> (`--no-default-features` melewatkan nokhwa/V4L2).
 
 ---
 
@@ -81,11 +80,11 @@ Skrip ini melakukan empat hal yang mudah salah bila dikerjakan manual:
 
 1. Membangun frontend Vite lebih dulu.
 2. Menjalankan `npx tauri android build --apk --target aarch64`.
-3. **Memverifikasi ketiga simbol JNI masih ada** di `libanti_timpa_lib.so`
-   sebelum menandatangani. Build release memakai `lto = true` dan `strip = true`;
-   tanpa `-Wl,--undefined` dari `build.rs`, entry point JNI hilang dan aplikasi
-   mati dengan `UnsatisfiedLinkError` saat kamera pertama dipanggil — kegagalan
-   yang **tidak pernah muncul di build debug**.
+3. Memverifikasi ketiga simbol JNI masih ada di `libanti_timpa_lib.so` sebelum
+   menandatangani. Build release memakai `lto = true` dan `strip = true`; tanpa
+   `-Wl,--undefined` dari `build.rs`, entry point JNI hilang dan aplikasi mati
+   dengan `UnsatisfiedLinkError` saat kamera pertama dipanggil. Kegagalan ini
+   tidak pernah muncul di build debug.
 4. Menandatangani dengan `apksigner` lalu memverifikasi signature-nya.
 
 APK jadi: `dist-apk/antitimpa-release.apk`.
@@ -133,9 +132,9 @@ Frame kamera Android masuk lewat JNI, jadi ada dua bagian yang harus terpasang d
    `app/src/main/java/org/antitimpa/antitimpa/`.
 4. Panggil `CameraBridge` dari `MainActivity` (`onCreate` / `onDestroy`).
 
-Perintah lengkap, alur frame, tabel gejala-log, dan **daftar yang belum
-diverifikasi di perangkat** ada di **[`android/README.md`](android/README.md)** —
-baca itu sebelum men-debug masalah kamera.
+Perintah lengkap, alur frame, tabel gejala-log, dan daftar yang belum
+diverifikasi di perangkat ada di [`android/README.md`](android/README.md). Baca
+itu sebelum men-debug masalah kamera.
 
 ### Log kamera
 
@@ -163,8 +162,7 @@ npx tsc --noEmit
 npm run build
 ```
 
-Verifikasi cepat CRCs tanpa aplikasi (command `verify_payload_crc` di Rust;
-sebelumnya `check_crc.py`):
+Verifikasi cepat CRCs tanpa aplikasi (command `verify_payload_crc` di Rust):
 
 ```bash
 cargo test --no-default-features --features jni-bridge --lib -- tampered_payload

@@ -5,6 +5,8 @@ import type { PreviewFrame } from "../types";
 interface CameraPreviewProps {
   /** Whether the preview loop should be running. */
   active: boolean;
+  /** When false, the per-frame size/count line is hidden. */
+  technical: boolean;
   /** Preview width in px. Lower = smaller payload per frame. */
   maxWidth?: number;
   /** Target frames per second. */
@@ -18,21 +20,21 @@ interface CameraPreviewProps {
  * ----------------------
  * There is no `<video>` element and no MediaStream. Frames are captured in
  * Rust, downscaled, JPEG-encoded, and handed over IPC as data URLs which are
- * assigned to `<img src>`. That is a deliberate trade-off: a real MediaStream
- * would be smoother, but it would require the platform camera to be owned by
- * the webview, which is exactly the coupling the rewrite is removing. Here the
- * camera stays owned by Rust and the UI only receives pixels.
+ * assigned to `<img src>`. A real MediaStream would be smoother, but it would
+ * require the platform camera to be owned by the webview, which is the coupling
+ * the rewrite is removing. Here the camera stays owned by Rust and the UI only
+ * receives pixels.
  *
  * Two rules keep this from misbehaving
  * -----------------------------------
- * 1. **No overlapping requests.** The next frame is only requested after the
+ * 1. No overlapping requests. The next frame is only requested after the
  *    previous one resolves. Without this, a slow frame causes a backlog of
  *    queued `invoke` calls that grows without bound and starves the analysis
  *    capture.
- * 2. **No updates after unmount.** StrictMode unmounts once in development; a
- *    loop that keeps running would keep the camera busy and leak.
+ * 2. No updates after unmount. StrictMode unmounts once in development; a loop
+ *    that keeps running would keep the camera busy and leak.
  */
-export function CameraPreview({ active, maxWidth = 480, fps = 8 }: CameraPreviewProps) {
+export function CameraPreview({ active, technical, maxWidth = 480, fps = 8 }: CameraPreviewProps) {
   const [frame, setFrame] = useState<PreviewFrame | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [stats, setStats] = useState({ count: 0, lastBytes: 0, attempts: 0 });
@@ -66,7 +68,7 @@ export function CameraPreview({ active, maxWidth = 480, fps = 8 }: CameraPreview
       setError(message);
       setStats((s) => ({ ...s, attempts: s.attempts + 1 }));
       // Log every distinct failure once. Without this a preview that never
-      // starts gives no clue why — the UI just sits on the placeholder.
+      // starts gives no clue why; the UI just sits on the placeholder.
       if (lastLoggedErrorRef.current !== message) {
         lastLoggedErrorRef.current = message;
         console.error("[preview] gagal mengambil frame:", message);
@@ -136,13 +138,19 @@ export function CameraPreview({ active, maxWidth = 480, fps = 8 }: CameraPreview
         )}
       </div>
 
-      {error && <div className="preview-error">{error}</div>}
+      {error && (
+        <div className="preview-error">
+          {technical ? error : "Pratinjau kamera belum siap."}
+        </div>
+      )}
 
-      <div className="preview-stats">
-        {frame
-          ? `${frame.width}×${frame.height} · ${(stats.lastBytes / 1024).toFixed(0)} KB/frame · ${stats.count} frame`
-          : `0 frame · ${stats.attempts} percobaan`}
-      </div>
+      {technical && (
+        <div className="preview-stats">
+          {frame
+            ? `${frame.width}×${frame.height} · ${(stats.lastBytes / 1024).toFixed(0)} KB/frame · ${stats.count} frame`
+            : `0 frame · ${stats.attempts} percobaan`}
+        </div>
+      )}
     </div>
   );
 }

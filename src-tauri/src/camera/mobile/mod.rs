@@ -1,20 +1,17 @@
 //! Mobile camera backend for Android / iOS.
 //!
-//! Unlike desktop, mobile frames do not come from a polling driver — the OS
+//! Unlike desktop, mobile frames do not come from a polling driver. The OS
 //! hands them to a native view (CameraX on Android, AVFoundation on iOS). So
-//! this backend is a *receiver*: the native side pushes the latest frame into
+//! this backend is a receiver: the native side pushes the latest frame into
 //! a shared slot, and `capture()` drains it.
 //!
-//! That inversion is the whole point. The old app had to render video through
-//! a Kivy widget and then reach back into it for pixels
-//! (`Camera4Kivy.analyze_pixels_callback` + `_last_pixels`), which coupled
-//! analysis to the UI toolkit. Here the transport is a plain frame slot, so
-//! the UI can render however it likes without the analysis caring.
+//! The transport is a plain frame slot, decoupled from the UI toolkit, so the
+//! UI can render however it likes without the analysis caring.
 //!
 //! Frame delivery contract
 //! -----------------------
-//! The native side produces **RGBA8888** buffers (what CameraX `ImageProxy`
-//! and `CVPixelBuffer` both give you most cheaply), plus a rotation hint. This
+//! The native side produces RGBA8888 buffers (what CameraX `ImageProxy`
+//! and `CVPixelBuffer` both produce most cheaply), plus a rotation hint. This
 //! module converts to the RGB the analysis layers expect and applies rotation,
 //! so the native code stays a thin transport with no image logic.
 
@@ -23,10 +20,20 @@
 /// Gated on `jni-bridge` as well as `target_os = "android"` so it can be
 /// compiled and unit-tested on a desktop host. The exported symbols are plain
 /// `extern "C"` functions with no Android-specific dependencies, so testing
-/// them on Linux is meaningful — and it is the only way to validate this code
+/// them on Linux is meaningful, and it is the only way to validate this code
 /// without an Android toolchain.
 #[cfg(any(target_os = "android", feature = "jni-bridge"))]
 pub mod android;
+
+/// iOS C-ABI bridge.
+///
+/// Gated on `ios-bridge` as well as `target_os = "ios"` so it can be compiled
+/// and unit-tested on a desktop host. The exported symbols are plain
+/// `extern "C"` functions with no Apple-specific dependencies, so testing them
+/// on Linux is meaningful, and it is the only way to validate this code
+/// without an Xcode toolchain.
+#[cfg(any(target_os = "ios", feature = "ios-bridge"))]
+pub mod ios;
 
 use super::log::{cam_debug, cam_error, cam_info, cam_warn};
 use super::{CameraBackend, CameraError, Frame};
@@ -37,9 +44,9 @@ use std::sync::{Arc, Mutex};
 /// Rotation reported by the native camera, in degrees clockwise.
 ///
 /// CameraX reports a `rotationDegrees` value that must be applied to the
-/// buffer before it is geometrically meaningful. The old app got this wrong
-/// repeatedly (it had a long comment about `flip_vertical()` toggling UV
-/// coordinates instead of flipping data), so it is handled explicitly here.
+/// buffer before it is geometrically meaningful. Rotation is handled
+/// explicitly here because UV-coordinate flips are a common source of error
+/// that silently corrupts the frame rather than reorienting it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Rotation {
     #[default]
@@ -65,35 +72,39 @@ impl Rotation {
     }
 }
 
-/// A native frame: raw RGBA plus the metadata needed to orient it.
+/// A native frame: raw RGB pixels plus the metadata needed to orient it.
+///
+/// Alpha is stripped at the intake boundary (see the Android bridge), so the
+/// slot holds 3 bytes per pixel rather than 4.
 #[derive(Debug, Clone)]
 pub struct NativeFrame {
     pub width: u32,
     pub height: u32,
-    pub rgba: Vec<u8>,
+    /// Row-major RGB8 pixels. Length must equal `width * height * 3`.
+    pub rgb: Vec<u8>,
     pub rotation: Rotation,
 }
 
 impl NativeFrame {
     /// Converts to the RGB [`Frame`] the analysis layers consume, applying
     /// rotation so downstream code never has to think about orientation.
+    ///
+    /// Alpha was already stripped at intake, so this is a validate-and-rotate
+    /// step, not a repack: a frame that needs no rotation is returned without
+    /// any further copy.
     pub fn into_frame(self) -> Result<Frame, CameraError> {
-        let expected = self.width as usize * self.height as usize * 4;
-        if self.rgba.len() != expected {
+        let expected = self.width as usize * self.height as usize * 3;
+        if self.rgb.len() != expected {
             return Err(CameraError::InvalidFrame {
                 expected,
-                actual: self.rgba.len(),
+                actual: self.rgb.len(),
             });
         }
 
-        // Strip alpha. Done before rotation so the rotation loops are simple.
-        let mut rgb = Vec::with_capacity((self.width * self.height * 3) as usize);
-        for px in self.rgba.chunks_exact(4) {
-            rgb.extend_from_slice(&px[0..3]);
-        }
-
         if self.rotation == Rotation::None {
-            return Frame::new(self.width, self.height, rgb);
+            // Move the buffer out rather than copying it: no rotation means the
+            // intake layout is already the analysis layout.
+            return Frame::new(self.width, self.height, self.rgb);
         }
 
         let (out_w, out_h) = if self.rotation.swaps_axes() {
@@ -102,6 +113,7 @@ impl NativeFrame {
             (self.width, self.height)
         };
 
+        let rgb = self.rgb;
         let mut rotated = vec![0u8; rgb.len()];
         for y in 0..self.height {
             for x in 0..self.width {
@@ -206,19 +218,74 @@ impl FrameSlot {
     }
 }
 
+/// Validates a native RGBA frame, strips its alpha channel in the same pass, and
+/// stores the result in `slot`.
+///
+/// Shared by every native bridge (Android JNI, iOS C-ABI) so the two platforms
+/// cannot drift: a frame one bridge accepts, the other must accept too. The
+/// alpha strip happens here, at the intake boundary, so a full-size RGBA buffer
+/// is never retained, only the 3-bytes-per-pixel RGB the layers consume.
+///
+/// Returns `Err(reason)` with a log-ready message when the frame is unusable
+/// (null pointer, zero dimensions, or too small for RGBA8888).
+///
+/// # Safety
+/// `buffer_ptr` must point to at least `buffer_len` readable bytes for the
+/// duration of the call.
+pub(crate) unsafe fn convert_and_store(
+    slot: &FrameSlot,
+    width: u32,
+    height: u32,
+    rotation_degrees: i32,
+    buffer_ptr: *const u8,
+    buffer_len: usize,
+) -> Result<(), String> {
+    if buffer_ptr.is_null() {
+        return Err("buffer_ptr null".to_string());
+    }
+    if width == 0 || height == 0 {
+        return Err(format!("dimensi tidak valid {width}x{height}"));
+    }
+
+    let expected = width as usize * height as usize * 4;
+    if buffer_len < expected {
+        return Err(format!(
+            "buffer terlalu kecil; butuh {expected} byte, dapat {buffer_len}. \
+             Pastikan format RGBA8888, bukan YUV_420_888 (konversi dulu di sisi native)"
+        ));
+    }
+
+    // Read the direct buffer and strip alpha in one pass. The native side owns
+    // the buffer and may reuse it as soon as the callback returns, so all
+    // reading happens here.
+    let rgba = std::slice::from_raw_parts(buffer_ptr, expected);
+    let mut rgb = Vec::with_capacity(width as usize * height as usize * 3);
+    for px in rgba.chunks_exact(4) {
+        rgb.extend_from_slice(&px[0..3]);
+    }
+
+    slot.push(NativeFrame {
+        width,
+        height,
+        rgb,
+        rotation: Rotation::from_degrees(rotation_degrees),
+    });
+    Ok(())
+}
+
 pub struct MobileCameraBackend {
     slot: FrameSlot,
 }
 
 impl MobileCameraBackend {
-    /// Creates a backend whose slot is **the same one the JNI bridge writes to**.
+    /// Creates a backend whose slot is the same one the JNI bridge writes to.
     ///
-    /// This sharing is the whole point of the design and is easy to get wrong:
-    /// an earlier version had `android.rs` pushing into a global slot while this
-    /// backend read from a private one, so every frame was rejected with "slot
-    /// belum di-install" and the camera never delivered anything. On Android
-    /// there is exactly one camera session per process, so one shared slot is
-    /// also the correct model rather than merely a convenience.
+    /// This sharing is easy to get wrong: an earlier version had `android.rs`
+    /// pushing into a global slot while this backend read from a private one,
+    /// so every frame was rejected with "slot belum di-install" and the camera
+    /// never delivered anything. On Android there is exactly one camera session
+    /// per process, so one shared slot is also the correct model rather than
+    /// merely a convenience.
     ///
     /// On non-Android hosts (where the JNI bridge is only compiled for tests)
     /// there is no native producer, so the backend owns a private slot that
@@ -255,7 +322,11 @@ fn native_slot() -> FrameSlot {
     {
         android::install_slot()
     }
-    #[cfg(not(target_os = "android"))]
+    #[cfg(target_os = "ios")]
+    {
+        ios::install_slot()
+    }
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         FrameSlot::new()
     }
@@ -334,7 +405,7 @@ mod tests {
         NativeFrame {
             width: w,
             height: h,
-            rgba: vec![255u8; (w * h * 4) as usize],
+            rgb: vec![255u8; (w * h * 3) as usize],
             rotation: Rotation::None,
         }
     }
@@ -381,7 +452,7 @@ mod tests {
         assert!(backend.is_ready());
         let frame = backend.capture().unwrap();
         assert_eq!((frame.width, frame.height), (2, 2));
-        assert_eq!(frame.rgb.len(), 2 * 2 * 3, "RGBA must be narrowed to RGB");
+        assert_eq!(frame.rgb.len(), 2 * 2 * 3, "frame is RGB at 3 bytes per pixel");
         assert!(!backend.is_ready(), "slot drained after capture");
     }
 
@@ -407,8 +478,8 @@ mod tests {
 
     #[test]
     fn rotation_90_swaps_axes() {
-        // A 4x2 frame rotated 90 degrees becomes 2x4. Getting this wrong is
-        // what made the old app's preview appear sideways.
+        // A 4x2 frame rotated 90 degrees becomes 2x4. Getting this wrong
+        // makes the preview appear sideways.
         let native = NativeFrame {
             rotation: Rotation::Deg90,
             ..native_frame(4, 2)
@@ -430,12 +501,12 @@ mod tests {
 
     #[test]
     fn rotation_maps_pixels_to_expected_corners() {
-        // Build a 2x1 RGBA frame: left=red, right=green. Rotated 90 degrees
+        // Build a 2x1 RGB frame: left=red, right=green. Rotated 90 degrees
         // clockwise, red must land top-right and green bottom-right.
         let native = NativeFrame {
             width: 2,
             height: 1,
-            rgba: vec![255, 0, 0, 255, 0, 255, 0, 255],
+            rgb: vec![255, 0, 0, 0, 255, 0],
             rotation: Rotation::Deg90,
         };
         let frame = native.into_frame().unwrap();
@@ -447,11 +518,11 @@ mod tests {
     }
 
     #[test]
-    fn wrong_sized_rgba_buffer_is_rejected() {
+    fn wrong_sized_rgb_buffer_is_rejected() {
         let native = NativeFrame {
             width: 4,
             height: 4,
-            rgba: vec![0u8; 10],
+            rgb: vec![0u8; 10],
             rotation: Rotation::None,
         };
         assert!(native.into_frame().is_err());

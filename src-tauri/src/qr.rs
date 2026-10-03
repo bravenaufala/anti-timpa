@@ -1,13 +1,10 @@
 //! QR decoding.
 //!
-//! Replaces the `cv2.QRCodeDetector` + `pyzbar` combination from
-//! `scanner_core.py::detect_qr`. The old code needed two decoders and a
-//! multi-scale/CLAHE fallback chain because OpenCV alone frequently found a
-//! QR's location but failed to decode its payload — especially for small QRs
+//! Decoding uses `rqrr`, a pure-Rust detector that supports multi-scale
+//! preparation directly. That collapses into one call the multi-decoder and
+//! multi-scale/CLAHE fallback chain otherwise needed when a detector finds a
+//! QR's location but fails to decode its payload, especially for small QRs
 //! inside large gallery photos.
-//!
-//! `rqrr` is a pure-Rust detector that supports multi-scale preparation
-//! directly, which collapses that whole fallback chain into one call.
 
 use crate::camera::Frame;
 use image::GrayImage;
@@ -22,8 +19,8 @@ pub struct QrHit {
 
 /// Attempts to decode a QR from a frame.
 ///
-/// Returns `Ok(None)` when the image is valid but contains no readable QR —
-/// that is a normal outcome, not an error, and the UI should say
+/// Returns `Ok(None)` when the image is valid but contains no readable QR.
+/// That is a normal outcome, not an error, and the UI should say
 /// "arahkan lebih dekat" rather than surface a failure.
 pub fn decode(frame: &Frame) -> Result<Option<QrHit>, String> {
     if frame.width == 0 || frame.height == 0 {
@@ -39,8 +36,8 @@ pub fn decode(frame: &Frame) -> Result<Option<QrHit>, String> {
     for grid in grids {
         // Only report a hit when the payload actually decodes. Returning a
         // location with an empty payload would make a correctly-printed but
-        // merely unreadable QR look like a tampered one — the exact bug the
-        // old code guarded against with its `raw_qris_str` check.
+        // merely unreadable QR look like a tampered one, the bug the old code
+        // guarded against with its `raw_qris_str` check.
         match grid.decode() {
             Ok((_meta, content)) if !content.is_empty() => {
                 // `bounds` is the four corner points of the QR in source-image

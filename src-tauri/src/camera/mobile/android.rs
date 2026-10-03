@@ -11,23 +11,23 @@
 //! and `strip = true` therefore treats them as dead code and removes them.
 //!
 //! The result is a build that works in debug and fails in release with
-//! `UnsatisfiedLinkError` — and the `.so` contains no trace of the symbols.
+//! `UnsatisfiedLinkError`, and the `.so` contains no trace of the symbols.
 //! Debug builds hide the problem because nothing is stripped or inlined away.
 //!
 //! The fix is `-Wl,--undefined=<symbol>` for each entry point, emitted from
-//! `build.rs`. That flag tells the *linker* to treat the symbol as a root even
+//! `build.rs`. That flag tells the linker to treat the symbol as a root even
 //! though no relocation points at it, so it survives LTO and stripping.
 //!
-//! Note that `#[used]` is **not** applicable here: it only works on statics,
-//! not functions. An earlier attempt to use it failed to compile. The linker
-//! flag is the mechanism that actually works, and the `JNI_EXPORTS` static
-//! below documents the entry points for `build.rs` to mirror.
+//! `#[used]` does not help here: it only works on statics, not functions. An
+//! earlier attempt to use it failed to compile. The linker flag is the
+//! mechanism that works, and the `JNI_EXPORTS` static below documents the
+//! entry points for `build.rs` to mirror.
 //!
-//! ## Why the exported names look so strange
+//! ## Exported symbol names
 //!
 //! These are JNI entry points, not ordinary FFI functions. When Kotlin declares
 //! a method as `external fun`, the JVM looks for a symbol whose name encodes the
-//! package, class, and method — with `_` in the method name escaped to `_1`.
+//! package, class, and method, with `_` in the method name escaped to `_1`.
 //!
 //! So `CameraBridge.antitimpa_push_frame` must be exported as:
 //!
@@ -36,16 +36,16 @@
 //!                                 ^^ package ^^  ^^ class ^^  ^^ method ^^
 //! ```
 //!
-//! Getting this wrong fails at *runtime*, not compile time, and the only clue is
+//! Getting this wrong fails at runtime, not compile time, and the only clue is
 //! an `UnsatisfiedLinkError` naming the symbol the JVM wanted. Exporting plain
 //! C names (`antitimpa_push_frame`) links fine and even shows up in `nm`, but
-//! the JVM never finds them — which is exactly how this file's first version
-//! crashed on launch.
+//! the JVM never finds them, which is how this file's first version crashed on
+//! launch.
 //!
 //! The parameter types are part of the JNI signature in principle, but the
 //! plain name is sufficient here because each method is overload-free.
 //!
-//! ## Why a global slot instead of passing state through JNI
+//! ## Global slot
 //!
 //! JNI calls cannot carry Rust-owned generics or mutexes. The conventional
 //! solution is a global that the JNI functions look up. That is what `SLOT` is.
@@ -53,28 +53,28 @@
 //! Only one camera session exists per process, so a single global is correct
 //! rather than a shortcut.
 //!
-//! ## Why the buffer arrives as a JNI object, not a pointer
+//! ## Buffer argument type
 //!
-//! A `java.nio.ByteBuffer` parameter is a **JVM object reference**, not a raw
+//! A `java.nio.ByteBuffer` parameter is a JVM object reference, not a raw
 //! memory address. Treating it as `*const u8` compiles, links, and then
 //! segfaults inside `memcpy` the moment a frame arrives, because the JVM's
 //! object reference is dereferenced as if it pointed at pixel data.
 //!
 //! The real address must be obtained through the JNI environment:
 //!
-//! * `GetDirectBufferAddress` returns the pointer for a *direct* buffer.
+//! * `GetDirectBufferAddress` returns the pointer for a direct buffer.
 //! * `GetDirectBufferCapacity` returns its length.
 //!
-//! Only direct buffers have a stable address, which is exactly why the Kotlin
-//! side is required to send one. A heap buffer would need `GetByteArrayElements`
-//! and a copy, or it would move under the GC.
+//! Only direct buffers have a stable address, which is why the Kotlin side is
+//! required to send one. A heap buffer would need `GetByteArrayElements` and a
+//! copy, or it would move under the GC.
 //!
 //! This is also why the buffer length is no longer a separate argument: taking
 //! it from `GetDirectBufferCapacity` removes any chance of the caller passing a
-//! length that disagrees with the actual allocation — the discrepancy that a
+//! length that disagrees with the actual allocation, the discrepancy that a
 //! short read would otherwise turn into memory corruption.
 
-use super::{FrameSlot, NativeFrame, Rotation};
+use super::FrameSlot;
 
 use std::sync::{Mutex, OnceLock};
 
@@ -132,7 +132,7 @@ pub unsafe extern "C" fn Java_org_antitimpa_antitimpa_CameraBridge_antitimpa_1pu
     // `JNIEnv` is a transparent wrapper; constructing it from the raw pointer is
     // the documented way to use the `jni` crate inside an `extern "C"` entry
     // point. Failure here means the JVM handed us an unusable environment, in
-    // which case no JNI call can succeed — so report rejection rather than
+    // which case no JNI call can succeed, so report rejection rather than
     // aborting the process.
     let env = match JNIEnv::from_raw(env) {
         Ok(env) => env,
@@ -202,58 +202,38 @@ pub unsafe fn push_frame_impl(
         return false;
     };
 
-    if buffer_ptr.is_null() {
-        cam_error("push_frame: buffer_ptr null");
-        return false;
-    }
-
-    if width == 0 || height == 0 {
-        cam_error(&format!("push_frame: dimensi tidak valid {width}x{height}"));
-        return false;
-    }
-
-    let expected = width as usize * height as usize * 4;
-    if buffer_len < expected {
-        cam_error(&format!(
-            "push_frame: buffer terlalu kecil; butuh {expected} byte, dapat {buffer_len}. \
-             Pastikan format RGBA8888, bukan YUV_420_888 (konversi dulu di sisi Kotlin)"
-        ));
-        return false;
-    }
-
-    // Copy synchronously: the JVM owns the buffer and may reuse it as soon as
-    // this call returns, so retaining the pointer would be a use-after-free.
-    let rgba = std::slice::from_raw_parts(buffer_ptr, expected).to_vec();
-
-    match mutex.lock() {
-        Ok(slot) => {
-            // Log the first few frames at INFO, then drop to DEBUG. The first
-            // frames are the interesting ones: if the pipeline is broken, the
-            // count stays at zero and the log says so plainly. After that,
-            // per-frame logging would flood logcat.
-            let count = slot.pushed_count();
-            if count < 3 {
-                cam_info(&format!(
-                    "frame #{count} diterima dari native: {width}x{height} rotasi={rotation_degrees} \
-                     ({} byte)",
-                    expected
-                ));
-            } else {
-                cam_debug(&format!(
-                    "push_frame: {width}x{height} rotasi={rotation_degrees}"
-                ));
-            }
-
-            slot.push(NativeFrame {
-                width,
-                height,
-                rgba,
-                rotation: Rotation::from_degrees(rotation_degrees),
-            });
-            true
-        }
+    let guard = match mutex.lock() {
+        Ok(g) => g,
         Err(_) => {
             cam_error("push_frame: mutex poisoned; frame dibuang");
+            return false;
+        }
+    };
+
+    // Log the first few frames at INFO, then drop to DEBUG. The first frames are
+    // the interesting ones: if the pipeline is broken, the count stays at zero
+    // and the log says so plainly. After that, per-frame logging would flood
+    // logcat.
+    let count = guard.pushed_count();
+    if count < 3 {
+        cam_info(&format!(
+            "frame #{count} diterima dari native: {width}x{height} rotasi={rotation_degrees} \
+             ({} byte)",
+            width as usize * height as usize * 4
+        ));
+    } else {
+        cam_debug(&format!(
+            "push_frame: {width}x{height} rotasi={rotation_degrees}"
+        ));
+    }
+
+    // Validation, the RGBA-to-RGB alpha strip, and the store all live in the
+    // shared `convert_and_store`, so this JNI path and the iOS C-ABI path stay
+    // identical.
+    match super::convert_and_store(&guard, width, height, rotation_degrees, buffer_ptr, buffer_len) {
+        Ok(()) => true,
+        Err(reason) => {
+            cam_error(&format!("push_frame: {reason}"));
             false
         }
     }
@@ -317,6 +297,7 @@ pub fn frames_received_impl() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::camera::mobile::{NativeFrame, Rotation};
 
     /// Serializes these tests: they share the process-wide `SLOT`, so running
     /// concurrently would let one test's frames leak into another's
@@ -382,7 +363,7 @@ mod tests {
     /// A release build removes these functions entirely: nothing in Rust
     /// references them, so the compiler and linker both treat them as dead code.
     /// The app then works in debug and dies in release with
-    /// `UnsatisfiedLinkError` — which is exactly what happened on device.
+    /// `UnsatisfiedLinkError`, which happened on device.
     ///
     /// This test reads `build.rs` and asserts the linker flags are present and
     /// spelled exactly as the exported symbols. It catches the two ways this fix
@@ -423,7 +404,7 @@ mod tests {
         a.push(NativeFrame {
             width: 1,
             height: 1,
-            rgba: vec![1, 2, 3, 4],
+            rgb: vec![1, 2, 3],
             rotation: Rotation::None,
         });
         assert!(b.has_frame(), "handles must share one slot");
@@ -439,7 +420,7 @@ mod tests {
         assert!(push(4, 4, 0));
         let frame = slot.take().expect("frame should be stored");
         assert_eq!((frame.width, frame.height), (4, 4));
-        assert_eq!(frame.rgba.len(), 4 * 4 * 4);
+        assert_eq!(frame.rgb.len(), 4 * 4 * 3, "alpha is stripped at intake");
     }
 
     #[test]
@@ -514,6 +495,6 @@ mod tests {
         }
 
         let frame = slot.take().expect("frame must survive source drop");
-        assert!(frame.rgba.iter().all(|&b| b == 7));
+        assert!(frame.rgb.iter().all(|&b| b == 7));
     }
 }

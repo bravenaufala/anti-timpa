@@ -10,18 +10,18 @@
 //!
 //! So preview frames are:
 //!
-//! 1. **Downscaled** to a small preview width (default 480 px).
-//! 2. **JPEG-encoded** at moderate quality (~30-60 KB).
-//! 3. **Base64-encoded** into a `data:` URL the DOM can assign to `<img src>`.
+//! 1. Downscaled to a small preview width (default 480 px).
+//! 2. JPEG-encoded at moderate quality (~30-60 KB).
+//! 3. Base64-encoded into a `data:` URL the DOM can assign to `<img src>`.
 //!
-//! That lands at roughly 40-80 KB per frame — a ~50x reduction. Combined with
+//! That lands at roughly 40-80 KB per frame, a ~50x reduction. Combined with
 //! a frame-rate cap in the UI, preview becomes cheap enough to run alongside
 //! the one-shot analysis capture.
 //!
-//! Note what is deliberately *not* done here: the preview is never used for
-//! analysis. Analysis always runs on the full-resolution frame in Rust. Sending
-//! a downscaled JPEG to the UI and analysing it there would destroy the
-//! Layer 1 optical checks, which depend on fine edge detail in the quiet zone.
+//! The preview is never used for analysis. Analysis always runs on the
+//! full-resolution frame in Rust. Sending a downscaled JPEG to the UI and
+//! analysing it there would break the Layer 1 optical checks, which depend on
+//! fine edge detail in the quiet zone.
 
 use crate::camera::Frame;
 
@@ -42,8 +42,8 @@ const PREVIEW_JPEG_QUALITY: u8 = 70;
 /// Encodes a frame as a `data:image/jpeg;base64,...` URL.
 ///
 /// `max_width` bounds the output width; height follows the aspect ratio. A
-/// frame already narrower than `max_width` is not upscaled — upscaling would
-/// cost bytes without adding information.
+/// frame already narrower than `max_width` is not upscaled, since upscaling
+/// would cost bytes without adding information.
 pub fn to_data_url(frame: &Frame, max_width: u32) -> Result<String, String> {
     if frame.width == 0 || frame.height == 0 {
         return Err("frame kosong".to_string());
@@ -130,8 +130,8 @@ mod tests {
 
     #[test]
     fn large_frame_is_downscaled_and_small() {
-        // The whole point of this module: a full-resolution frame must shrink
-        // dramatically. Without downscaling, IPC transport is not viable.
+        // A full-resolution frame must shrink dramatically. Without
+        // downscaling, IPC transport is not viable.
         let frame = solid_frame(1280, 720, [80, 90, 100]);
         let url = to_data_url(&frame, DEFAULT_PREVIEW_WIDTH).unwrap();
         let bytes = decode_payload(&url);

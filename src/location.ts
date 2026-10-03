@@ -16,12 +16,12 @@
  * | Desktop | Offline city table, resolved from the typed city name | Desktop has no OS location service to ask |
  * | Browser (`npm run dev`) | `navigator.geolocation`, best-effort | Present so UI work outside Tauri is possible; not a supported path |
  *
- * The desktop choice deserves justification, because "why not just use IP
+ * The desktop choice needs some justification, since "why not just use IP
  * geolocation or `navigator.geolocation` on desktop" is the obvious question.
  * Both would send the user's location to a third party, which contradicts the
- * app's central guarantee that no scan data leaves the device. The offline table
- * costs one typed word and no privacy, and the comparison it enables — "is this
- * merchant's city plausible for where I am" — only needs city resolution, not
+ * app's guarantee that no scan data leaves the device. The offline table costs
+ * one typed word and no privacy, and the comparison it enables ("is this
+ * merchant's city plausible for where I am") only needs city resolution, not
  * GPS precision.
  */
 
@@ -133,15 +133,15 @@ async function readBrowserLocation(): Promise<ResolvedLocation> {
 /**
  * Resolves the location Layer 3 should use.
  *
- * Order of preference, and the reasoning for it:
+ * Order of preference:
  *
- * 1. **A device GPS fix**, when the user opted in and the platform has a real
+ * 1. A device GPS fix, when the user opted in and the platform has a real
  *    location service. This is the only true measurement.
- * 2. **The offline city table**, from the typed city name. No GPS, no network,
- *    no permission — and it resolves to the same city reference point the Layer 3
+ * 2. The offline city table, from the typed city name. No GPS, no network,
+ *    no permission, and it resolves to the same city reference point the Layer 3
  *    table uses, so the resulting distance is meaningful even without a fix.
- * 3. **Nothing.** Layer 3 then reports `NOT RUN` and the UI says the comparison
- *    did not happen, which is the correct outcome when location is genuinely
+ * 3. Nothing. Layer 3 then reports `NOT RUN` and the UI says the comparison
+ *    did not happen, which is the right outcome when location is genuinely
  *    unknown.
  *
  * @param cityName what the user typed, if anything
